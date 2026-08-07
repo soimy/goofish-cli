@@ -9,13 +9,13 @@
 参与，时间不可控，违反合约。所以两条路并存，根据"浏览器是否还认识你"自动/手动选。
 
 passport 页面（`passport.goofish.com/mini_login.htm?...&styleType=vertical`）的
-vertical 布局里扫码区和密码区并排，canvas 首屏就在 DOM 里——不用切 tab。
+vertical 布局里扫码区和密码区并排，`.qrcode-login` 容器首屏就在 DOM 里——不用切 tab。
 
 流程：
 1. `goofish_page(cookies={})` 开**干净 tmp profile**（否则 passport 会优先走"快速
    进入"跳过 QR）
-2. goto 首页触发 `#alibaba-login-box` iframe
-3. 等 `.qrcode-login canvas` 渲染 → QR 就绪
+2. goto `/login` 登录页触发 passport iframe（首页改版后不再自动弹登录框）
+3. 按 URL 轮询 `page.frames` 找 passport frame，等 `.qrcode-login` 渲染 → QR 就绪
 4. 轮询 `context.cookies()`：看见 `_m_h5_tk / unb / cookie2` 全到位说明扫码 +
    手机端确认都过了，抓快照返回
 5. 超时（默认 120s，`GOOFISH_QR_TIMEOUT` 可调）→ 空 dict，上层报 AuthRequiredError
@@ -31,7 +31,7 @@ from loguru import logger
 
 from goofish_cli.core.session import resolve_cookie_path, write_cookies_json
 
-HOME_URL = "https://www.goofish.com"
+HOME_URL = "https://www.goofish.com/login"
 
 # 扫码 + 手机确认后，passport 会下发完整 session cookie。这三个齐了才算真的登上：
 # _m_h5_tk 是 h5 签名、unb 是用户 id、cookie2 是 session token。
@@ -40,23 +40,37 @@ _REQUIRED_LOGIN_COOKIES = ("_m_h5_tk", "unb", "cookie2")
 _DEFAULT_QR_TIMEOUT = 120
 
 
+async def _find_passport_frame(page: Any, timeout_ms: int = 20000) -> Any:
+    """按 URL 轮询 page.frames 找 passport iframe。
+
+    不用 element_handle.content_frame()：iframe 加载中会先 about:blank 再跳到
+    passport 域，期间句柄跨文档失效，报 "Unable to adopt element handle from a
+    different document"。直接轮询 page.frames 按 URL 匹配没有这个问题。
+    """
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        for frame in page.frames:
+            if "passport" in (frame.url or ""):
+                return frame
+        await asyncio.sleep(0.5)
+    return None
+
+
 async def _wait_for_qr(page: Any, timeout_ms: int = 15000) -> bool:
-    """等 passport iframe 里 QR canvas 渲染出来（说明可扫）。"""
-    try:
-        iframe_el = await page.wait_for_selector("#alibaba-login-box", timeout=timeout_ms)
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"[qr] 未检测到 passport iframe：{e}（首页或许已登录？）")
-        return False
-    frame = await iframe_el.content_frame()
+    """等 passport iframe 里扫码区渲染出来（说明可扫）。
+
+    QR 码容器是 `.qrcode-login`（内嵌 `.qrcode-img` 图片）。注意不是 canvas——
+    passport 页改版后 QR 用 <img> 渲染，老选择器 `.qrcode-login canvas` 永远等不到。
+    """
+    frame = await _find_passport_frame(page)
     if not frame:
-        logger.warning("[qr] passport iframe content_frame 未就绪")
+        logger.warning("[qr] 未检测到 passport iframe（登录页结构可能又变了）")
         return False
     try:
-        await frame.wait_for_load_state("domcontentloaded", timeout=5000)
-        await frame.wait_for_selector(".qrcode-login canvas", timeout=timeout_ms)
+        await frame.wait_for_selector(".qrcode-login", timeout=timeout_ms)
         return True
     except Exception as e:  # noqa: BLE001
-        logger.warning(f"[qr] QR canvas 未渲染：{e}")
+        logger.warning(f"[qr] QR 扫码区未渲染：{e}")
         return False
 
 

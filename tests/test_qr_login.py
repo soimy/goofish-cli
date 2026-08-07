@@ -127,3 +127,28 @@ def test_login_via_qr_explicit_timeout_wins_over_env(monkeypatch):
 )
 def test_has_all_login_cookies(cookies, expected):
     assert qr_login._has_all_login_cookies(cookies) is expected
+
+
+class _FakeFrame:
+    def __init__(self, url):
+        self.url = url
+
+
+class _FakePage:
+    def __init__(self, frames):
+        self.frames = frames
+
+
+async def test_find_passport_frame_matches_by_url():
+    page = _FakePage([
+        _FakeFrame("https://www.goofish.com/login"),
+        _FakeFrame("https://passport.goofish.com/mini_login.htm?appName=xianyu"),
+    ])
+    frame = await qr_login._find_passport_frame(page, timeout_ms=1000)
+    assert frame is page.frames[1]
+
+
+async def test_find_passport_frame_none_when_absent():
+    page = _FakePage([_FakeFrame("https://www.goofish.com/login")])
+    frame = await qr_login._find_passport_frame(page, timeout_ms=500)
+    assert frame is None
