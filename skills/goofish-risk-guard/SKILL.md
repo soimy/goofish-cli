@@ -20,6 +20,12 @@ allowed-tools:
 
 # 闲鱼风控预检
 
+## 工具命名
+
+正文使用 `auth_status` 这类逻辑名。OpenClaw 调 `goofish__<逻辑名>`；
+Claude Code / Cursor 调 `mcp__goofish__<逻辑名>`。frontmatter 的 `allowed-tools`
+保留 Claude 权限预批准格式，OpenClaw 不读取该字段。
+
 ## 定位
 
 这是 **被其它 skill 频繁调用的知识库型 skill**。Agent 读它的 references，不一定要调 MCP 工具。

@@ -23,7 +23,30 @@ sudo apt install nodejs # Debian/Ubuntu
 ```bash
 uv run pytest
 uv run ruff check src tests
+npm test
+npm run pack:check
 ```
+
+改动 OpenClaw bundle 时还要用隔离配置做一次 link 或打包后的 `.tgz` archive 安装，确认
+`openclaw plugins inspect goofish --json` 能识别 skills 和 MCP server。OpenClaw
+`2026.7.1` 的 `mcp doctor` 不读取 bundle MCP 配置，不能代替这个检查。
+发布 ClawHub bundle 前必须先在 PyPI 发布同版本 `goofish-cli`，并实际运行
+`uvx --from goofish-cli==<version> goofish-cli` 完成 MCP handshake；`.mcp.json`
+故意精确锁定两个包的版本，不会自动回退到旧版 Python 运行时。
+用 ClawHub CLI 发布时要显式指定 bundle family：
+
+```bash
+npm pack
+clawhub package publish ./openclaw-goofish-<version>.tgz \
+  --family bundle-plugin --bundle-format codex --host-targets openclaw --dry-run
+```
+
+`openclaw.plugin.json` 只提供 ClawHub 包身份和空配置 schema；实际运行入口仍是
+`.codex-plugin/plugin.json` 和 `.mcp.json`，`package.json` 不得增加 `openclaw.extensions`。
+工具过滤必须通过 `openclaw agent --local` 的 embedded-agent 会话 trajectory 验证；
+`openclaw mcp probe` 不读取 bundle 的 `.mcp.json`，不能作为 bundle E2E 证据。
+预期为 13 个业务工具可见，4 个 `toolFilter.exclude` 工具不可见；OpenClaw
+另外生成的 4 个 prompts/resources 桥接工具不计入业务工具数。
 
 单测全绿 **不等于** 功能可用。下面三种情况是硬门槛：
 

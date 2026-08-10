@@ -6,6 +6,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- OpenClaw / ClawHub compatible bundle metadata. The bundle contributes the existing five skills
+  and launches the pinned `goofish-cli` MCP server through `uvx` on OpenClaw 2026.6.1 or newer.
+- OpenClaw package checks covering version alignment, MCP safety filters, package contents, and
+  secret-bearing path exclusions.
+
+### Changed
+- Goofish skills now document both OpenClaw (`goofish__*`) and Claude
+  (`mcp__goofish__*`) MCP tool names.
+
 ## [0.3.0] - 2026-04-22
 
 ### Added

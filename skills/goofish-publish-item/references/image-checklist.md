@@ -34,7 +34,7 @@
 
 ```
 for path_or_url in images:
-    result = mcp__goofish__media_upload(path_or_url)
+    result = media_upload(path_or_url)
     uploaded.append({
         "url": result["url"],
         "width": result["width"],

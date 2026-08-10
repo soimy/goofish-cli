@@ -4,7 +4,7 @@
 
 - 磁盘：`~/.goofish-cli/cookies.json`（可通过 `GOOFISH_COOKIES_PATH` 覆盖）
 - 内存：`Session.http.cookies`（requests 的 CookieJar）
-- `mcp__goofish__auth_status` 返回 `{unb, tracknick, nick, valid, h5_token_exp}`
+- `auth_status` 返回 `{unb, tracknick, nick, valid, h5_token_exp}`
 
 ## 关键 cookie 字段
 

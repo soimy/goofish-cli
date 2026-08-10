@@ -19,6 +19,12 @@ allowed-tools:
 
 # 闲鱼店铺诊断
 
+## 工具命名
+
+正文使用 `auth_status` 这类逻辑名。OpenClaw 调 `goofish__<逻辑名>`；
+Claude Code / Cursor 调 `mcp__goofish__<逻辑名>`。frontmatter 的 `allowed-tools`
+保留 Claude 权限预批准格式，OpenClaw 不读取该字段。
+
 ## 定位
 
 **纯读 skill**——诊断、不修。要修的话跳到 `goofish-publish-item`。
@@ -37,7 +43,7 @@ allowed-tools:
 ### Step 1 · 买家视角搜索自检
 
 ```
-mcp__goofish__search_items(
+search_items(
     keyword="<商品核心词>",  # 从用户描述或 item 标题提取
     # 可以按地理/价格 filter 更精准
 )
@@ -57,7 +63,7 @@ mcp__goofish__search_items(
 ### Step 2 · 拉自家商品详情
 
 ```
-mcp__goofish__item_view(item_id=<问题商品>)
+item_view(item_id=<问题商品>)
 ```
 
 对比：

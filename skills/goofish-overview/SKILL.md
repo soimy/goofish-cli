@@ -4,7 +4,7 @@ description: |
   闲鱼（goofish.com）自动化运营的总入口 skill。何时激活：用户首次提到
   闲鱼 / 咸鱼 / goofish / 二手交易 / 挂闲置 / 回买家消息 / 发商品到闲鱼，
   或用户询问本工具如何使用、有哪些能力、能做什么。本 skill 介绍 goofish-cli
-  的定位、账号模型、16 个 MCP 工具速查、风控底线，并指向其它专项 skill
+  的定位、账号模型、17 个 MCP 工具速查、风控底线，并指向其它专项 skill
   （goofish-publish-item / goofish-reply-buyer / goofish-risk-guard /
   goofish-shop-diagnosis）。
 metadata:
@@ -17,11 +17,18 @@ metadata:
 
 ## 这是什么
 
-`goofish-cli` 是一个 **Python CLI + MCP server + Claude Skills** 三合一工具包，
+`goofish-cli` 是一个 **Python CLI + MCP server + Agent Skills** 三合一工具包，
 让 AI Agent 能像熟练卖家一样操作闲鱼：发商品、回消息、查风控、诊断店铺。
 
-你（Agent）在 Claude Code / Cursor 里通过 MCP 看到的工具，都来自同一个
+你（Agent）在 OpenClaw / Claude Code / Cursor 里通过 MCP 看到的工具，都来自同一个
 `goofish` server（`FastMCP("goofish")`）。
+
+## 工具命名
+
+本文使用 registry 里的逻辑名（例如 `auth_status`）。实际调用时按宿主补前缀：
+
+- OpenClaw：`goofish__auth_status`
+- Claude Code / Cursor：`mcp__goofish__auth_status`
 
 ## 四个专项 Skill 的分工
 
@@ -39,7 +46,7 @@ metadata:
 
 ## 账号与登录态
 
-- 登录态由 `mcp__goofish__auth_status` 检查，返回 `{valid: bool}`。
+- 登录态由 `auth_status` 检查，返回 `{valid: bool}`。
 - 自动刷新链路已内置（v0.2.2 - v0.2.4）：token 过期自动续、session 过期
   自动点 passport "快速进入"、浏览器免密失效需用户 `goofish auth login --qr`。
 - **Agent 不应主动调 `auth_login`**，这是敏感命令（会覆盖磁盘 cookie）。
@@ -47,7 +54,7 @@ metadata:
   `goofish auth login --qr`。
 - 账号身份细节见 `references/accounts.md`。
 
-## 16 个 MCP 工具速查
+## 17 个 MCP 工具速查
 
 详单在 `references/mcp-tools-index.md`。读不读看任务：
 - 发商品 → 只需 `category_recommend / media_upload / location_default / item_publish`
@@ -57,8 +64,7 @@ metadata:
 - 下架/删除 → `item_delete`
 - skills 安装 → `skills_install`（辅助类工具，一般 Agent 不会直接调；由用户在终端跑）
 
-**工具命名**：MCP 注册为 `mcp__goofish__{namespace}_{name}` 下划线格式。
-例如 CLI 里的 `message list-chats` 在 MCP 是 `mcp__goofish__message_list_chats`。
+例如 CLI 的 `message list-chats` 对应逻辑名 `message_list_chats`，调用时使用上面的宿主前缀。
 
 ## 合规硬红线（本工具禁止协助）
 

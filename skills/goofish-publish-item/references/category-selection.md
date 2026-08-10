@@ -2,12 +2,12 @@
 
 ## 核心原则
 
-**不要猜类目**。`mcp__goofish__category_recommend` 接入的是淘系类目库，比人拍脑袋准。
+**不要猜类目**。`category_recommend` 接入的是淘系类目库，比人拍脑袋准。
 
 ## 调用姿势
 
 ```
-mcp__goofish__category_recommend(
+category_recommend(
     title="候选标题（尽量带品牌+核心词）",
     images=["首图URL"]
 )

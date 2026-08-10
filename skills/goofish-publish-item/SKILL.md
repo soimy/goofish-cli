@@ -21,6 +21,12 @@ allowed-tools:
 
 # 闲鱼发商品
 
+## 工具命名
+
+正文使用 `auth_status` 这类逻辑名。OpenClaw 调 `goofish__<逻辑名>`；
+Claude Code / Cursor 调 `mcp__goofish__<逻辑名>`。frontmatter 的 `allowed-tools`
+保留 Claude 权限预批准格式，OpenClaw 不读取该字段。
+
 ## 触发姿势
 
 用户典型输入：
@@ -35,7 +41,7 @@ allowed-tools:
 ### Step 1 · 登录态自检（必做）
 
 ```
-调 mcp__goofish__auth_status
+调 auth_status
   valid=true → 继续
   valid=false → 不继续；告诉用户: "登录态失效了，请执行 goofish auth login（扫码走 --qr）"，停。
 ```
@@ -61,7 +67,7 @@ allowed-tools:
 ### Step 3 · 类目识别
 
 ```
-调 mcp__goofish__category_recommend(title=候选标题, images=[首图])
+调 category_recommend(title=候选标题, images=[首图])
   → 拿到 catId / catName
 ```
 
@@ -91,7 +97,7 @@ allowed-tools:
 
 ```
 for image in images:
-    调 mcp__goofish__media_upload(image)
+    调 media_upload(image)
     收集返回的 {url, width, height}
 
 检查:
@@ -120,7 +126,7 @@ for image in images:
 
 确认后：
 ```
-调 mcp__goofish__item_publish(
+调 item_publish(
     title=..., 
     desc=..., 
     price=..., 

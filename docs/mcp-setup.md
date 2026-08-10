@@ -1,6 +1,47 @@
 # MCP 接入指南
 
-## Claude Code / Codex CLI
+## OpenClaw / ClawHub
+
+要求：OpenClaw `2026.6.1` 及以上，且 PATH 中可以执行 `uvx`。
+
+ClawHub 发布后安装：
+
+```bash
+openclaw plugins install clawhub:openclaw-goofish
+uvx --from goofish-cli==0.3.0 goofish auth login --qr
+openclaw plugins inspect goofish --json
+openclaw gateway restart
+```
+
+本地开发使用 link 安装：
+
+```bash
+openclaw plugins install -l /path/to/goofish-cli
+openclaw plugins inspect goofish --json
+```
+
+`inspect` 应显示 `Format: bundle`、Codex subtype，以及 skills 和 MCP server 能力。
+Gateway 重启后新会话中，工具名为 `goofish__<逻辑名>`，例如
+`goofish__auth_status` 和 `goofish__item_get`。
+
+bundle 默认过滤以下工具：
+
+| 工具 | 原因 |
+|---|---|
+| `auth_login` | 会覆盖磁盘登录态，应由用户在终端执行 |
+| `auth_reset_guard` | 恢复动作需要用户判断，且不能解除服务端风控 |
+| `message_watch` | 常驻阻塞式连接，不适合作为单次 Agent tool |
+| `skills_install` | bundle 已直接提供 skills，无需 Agent 再安装 |
+
+OpenClaw `2026.7.1` 的 `openclaw mcp doctor` 只读取 `openclaw.json` 中的
+`mcp.servers`，不会读取 bundle 的 `.mcp.json`；因此插件验收应使用 `plugins inspect`
+和 embedded agent 新会话的 trajectory 工具目录，不要重复配置同一个 server
+只为运行 doctor。验收时应看到 13 个 Goofish 业务工具，且不应看到上表的
+4 个过滤工具。OpenClaw 还会为 MCP prompts/resources 生成
+`goofish__prompts_*` 和 `goofish__resources_*` 4 个桥接工具，因此按
+`goofish__*` 前缀统计的总数是 17，不代表 `toolFilter` 失效。
+
+## Claude Code
 
 在 `~/.claude/settings.json` 或项目 `.claude/settings.json` 加：
 
@@ -33,7 +74,8 @@
 
 ## 可用工具
 
-启动后 Claude 获得以下 tool：
+启动后 Claude 获得以下 tool；skills 中使用 Claude 的
+`mcp__goofish__<逻辑名>` 前缀：
 
 | Tool 名 | 说明 |
 |---|---|
