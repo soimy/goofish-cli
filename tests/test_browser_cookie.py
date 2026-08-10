@@ -51,9 +51,9 @@ def test_available_browsers_has_edge_and_chrome():
 def test_extract_single_browser_success(monkeypatch):
     """edge 里抓到 unb/_m_h5_tk → 正常返回 (browser, cookies)。"""
     jar = _fake_jar(
-        _make_cookie("unb", "2214350705775", ".taobao.com"),
+        _make_cookie("unb", "test-unb", ".taobao.com"),
         _make_cookie("_m_h5_tk", "TOKEN_abc_123", ".taobao.com"),
-        _make_cookie("tracknick", "xy575986", ".goofish.com"),
+        _make_cookie("tracknick", "test-tracknick", ".goofish.com"),
         # 非阿里系域的 cookie，必须被过滤
         _make_cookie("sessionid", "other", ".example.com"),
     )
@@ -62,9 +62,9 @@ def test_extract_single_browser_success(monkeypatch):
 
     used, cookies = bc.extract_goofish_cookies(browser="edge")
     assert used == "edge"
-    assert cookies["unb"] == "2214350705775"
+    assert cookies["unb"] == "test-unb"
     assert cookies["_m_h5_tk"] == "TOKEN_abc_123"
-    assert cookies["tracknick"] == "xy575986"
+    assert cookies["tracknick"] == "test-tracknick"
     assert "sessionid" not in cookies
 
 

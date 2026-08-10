@@ -17,23 +17,23 @@ def test_parse_session_full():
             }
         },
         "session": {
-            "ownerInfo": {"userId": "2214350705775", "nick": "x***2"},
-            "sessionId": 60585751957,
+            "ownerInfo": {"userId": "test-owner", "nick": "x***2"},
+            "sessionId": "test-cid",
             "sessionType": 1,
             "targetId": "1300",
             "userInfo": {
                 "fishNick": "小号昵称",
                 "logo": "https://x.png",
-                "nick": "xy575986224572",
+                "nick": "test-peer",
                 "type": 0,
-                "userId": "2215266653893",
+                "userId": "test-user",
             },
         },
     }
     out = _parse_session(raw)
-    assert out["session_id"] == "60585751957"
-    assert out["peer_nick"] == "xy575986224572"
-    assert out["peer_user_id"] == "2215266653893"
+    assert out["session_id"] == "test-cid"
+    assert out["peer_nick"] == "test-peer"
+    assert out["peer_user_id"] == "test-user"
     assert out["unread"] == 2
     assert out["last_msg"] == "在吗？这个还在卖吗"
     assert out["ts"] == 1776780018537
@@ -83,15 +83,15 @@ def test_parse_session_null_summary():
 
 def test_watch_record_shape():
     out = _watch_record({
-        "cid": "60585751957",
+        "cid": "test-cid",
         "session_type": 1,
-        "peer_user_id": "2215266653893",
+        "peer_user_id": "test-user",
         "item_id": "900123",
         "last_msg_id": "msg-x",
         "last_msg_ts": "1776780018537",
     })
-    assert out["session_id"] == "60585751957"
-    assert out["peer_user_id"] == "2215266653893"
+    assert out["session_id"] == "test-cid"
+    assert out["peer_user_id"] == "test-user"
     assert out["item_id"] == "900123"
     assert out["session_type"] == 1
     assert out["ts"] == 1776780018537

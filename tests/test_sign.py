@@ -32,7 +32,7 @@ def test_generate_sign_differs_on_input():
 def test_generate_device_id():
     from goofish_cli.core.sign import generate_device_id
 
-    d1 = generate_device_id("2214350705775")
+    d1 = generate_device_id("testunb")
     # UUID 形式，后缀为 user_id
-    assert d1.endswith("-2214350705775")
+    assert d1.endswith("-testunb")
     assert len(d1.split("-")) == 6  # UUID 5 段 + user_id

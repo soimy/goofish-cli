@@ -48,7 +48,7 @@ def test_incoming_text_new_format():
                 "text": {"text": "可以砍价吗"},
                 "reminder": {"reminderTitle": "小号昵称", "reminderContent": "可以砍价吗"},
             },
-            "senderInfo": {"senderUserId": "2217372889946"},
+            "senderInfo": {"senderUserId": "test-user"},
         },
     }
     got = extract_incoming_text(decoded)
@@ -56,7 +56,7 @@ def test_incoming_text_new_format():
         "event": "message",
         "cid": "12345",
         "content_type": 1,
-        "send_user_id": "2217372889946",
+        "send_user_id": "test-user",
         "send_user_name": "小号昵称",
         "send_message": "可以砍价吗",
     }
@@ -92,24 +92,24 @@ def test_incoming_text_legacy_format():
 def test_meta_event_read_receipt():
     """{"1":[msgIds],"2":2,"3":"cid@goofish","4":1,"5":"ts"} → 已读回执。"""
     decoded = {
-        "1": ["4066826134477.PNM", "4066820235744.PNM"],
-        "2": 2, "3": "60585751957@goofish", "4": 1, "5": "1776770736198",
+        "1": ["test-msg-1.PNM", "test-msg-2.PNM"],
+        "2": 2, "3": "test-cid@goofish", "4": 1, "5": "1776770736198",
     }
     got = extract_meta_event(decoded)
     assert got == {
-        "event": "read", "cid": "60585751957",
-        "msg_ids": ["4066826134477.PNM", "4066820235744.PNM"],
+        "event": "read", "cid": "test-cid",
+        "msg_ids": ["test-msg-1.PNM", "test-msg-2.PNM"],
         "status": 1, "ts": "1776770736198",
     }
 
 
 def test_meta_event_new_msg_notification():
     """{"1":"cid@goofish","2":1,"3":"msgId","4":"ts"} → 新消息轻量通知（无正文）。"""
-    decoded = {"1": "60585751957@goofish", "2": 1, "3": "4077151514478.PNM", "4": "1776770736064"}
+    decoded = {"1": "test-cid@goofish", "2": 1, "3": "test-msg.PNM", "4": "1776770736064"}
     got = extract_meta_event(decoded)
     assert got == {
-        "event": "new_msg", "cid": "60585751957",
-        "msg_id": "4077151514478.PNM", "ts": "1776770736064",
+        "event": "new_msg", "cid": "test-cid",
+        "msg_id": "test-msg.PNM", "ts": "1776770736064",
     }
 
 
