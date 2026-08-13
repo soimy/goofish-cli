@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 - Goofish skills now document both OpenClaw (`goofish__*`) and Claude
   (`mcp__goofish__*`) MCP tool names.
+- Constrain the MCP Python SDK to the maintained 1.x line. MCP 2.0 removes the
+  `mcp.server.fastmcp` API used by the current server and otherwise breaks clean installs.
 
 ## [0.3.0] - 2026-04-22
 
