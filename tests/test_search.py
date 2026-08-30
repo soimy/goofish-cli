@@ -21,6 +21,17 @@ def test_normalize_limit_clamps_and_defaults():
     assert normalize("abc") == 20
 
 
+def test_normalize_pages_clamps_and_defaults():
+    normalize = t["_normalize_pages"]
+    assert normalize(1) == 1
+    assert normalize("3") == 3
+    assert normalize(0) == 1
+    assert normalize(-2) == 1
+    assert normalize(999) == t["MAX_PAGES"]
+    assert normalize(None) == 1
+    assert normalize("abc") == 1
+
+
 def test_build_search_url_encodes_query():
     build = t["_build_search_url"]
     assert build("iPhone 15") == "https://www.goofish.com/search?q=iPhone%2015"

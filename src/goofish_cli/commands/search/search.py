@@ -5,6 +5,12 @@
 - search 没对外 API，只有 HTML 卡片 + 动态加载
 - 浏览器真实渲染天然抗风控
 
+分页（2026-08 实测）：搜索页**不是无限滚动**——窄查询滚动到底卡片数不再增长；
+翻页靠 DOM 里的 `search-pagination-container`（宽查询下 1..50 页），点击右箭头后
+SPA 内部重渲染、URL 不变，`?page=N` URL 参数被服务端忽略。所以跨页抓取 = 点击
+翻页箭头 + 按 item_id 去重累积，终止条件：达到 --pages 上限 / 右箭头 disabled /
+连续一页无新增（防御）。
+
 字段参考 OpenCLI：`item_id / rank / title / price / original_price / condition /
 brand / location / badge / url / extra`。
 """
@@ -18,10 +24,16 @@ from goofish_cli.core import Strategy, command
 from goofish_cli.core.browser import auto_scroll, goofish_page
 from goofish_cli.core.errors import AuthRequiredError, GoofishError
 
-MAX_LIMIT = 50
-# 0 卡片 + requiresAuth 时判定为疑似瞬时登录墙（同一 cookie 注入实测时好时坏），
+# limit 是**跨页总上限**（去重后条数）。站点每页 30 卡，50 页满配远超此值，
+# 200 是给 MCP 调用方的运行时护栏（每页 ~4s，200 条 ≈ 7 页 ≈ 40s）。
+MAX_LIMIT = 200
+DEFAULT_LIMIT = 20
+MAX_PAGES = 50  # 与站点分页控件一致（实测 1..50）
+# 0 卡片 + 非 empty/blocked 时判定为疑似瞬时登录墙（同一 cookie 注入实测时好时坏），
 # 总尝试次数（含首次）。重试前短暂退避，避免连续两枪都打在风控瞬间。
 AUTH_WALL_ATTEMPTS = 2
+# 点击翻页后的兜底等待；主等待靠"首卡片 id 变化"事件，这里只兜渲染卡住的底
+PAGE_STABLE_MS = 2000
 
 
 def _should_retry(payload: dict[str, Any]) -> bool:
@@ -33,8 +45,16 @@ def _normalize_limit(value: Any) -> int:
     try:
         n = int(value)
     except (TypeError, ValueError):
-        return 20
+        return DEFAULT_LIMIT
     return min(MAX_LIMIT, max(1, n))
+
+
+def _normalize_pages(value: Any) -> int:
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return 1
+    return min(MAX_PAGES, max(1, n))
 
 
 def _item_id_from_url(url: str) -> str:
@@ -121,42 +141,140 @@ _EXTRACT_JS = r"""
 })()
 """
 
+# 翻页控件状态：右箭头是否可用 + 分页盒里的最大页码（实测 1..50，"..." 是非数字盒）
+_PAGINATION_JS = r"""
+() => {
+  const boxes = [...document.querySelectorAll('[class*="page-box"]')]
+    .map((e) => (e.textContent || '').trim())
+    .filter((t) => /^\d+$/.test(t))
+    .map(Number);
+  const arrows = [...document.querySelectorAll('[class*="pagination-arrow-container"]')];
+  const right = arrows.length ? arrows[arrows.length - 1] : null;
+  return {
+    hasNext: Boolean(right) && !right.hasAttribute('disabled'),
+    totalPages: boxes.length ? Math.max(...boxes) : null,
+  };
+}
+"""
 
-async def _search_once(query: str, limit: int) -> dict[str, Any]:
-    url = _build_search_url(query)
-    async with goofish_page() as page:
-        await page.goto(url, wait_until="domcontentloaded")
-        await page.wait_for_timeout(2000)
-        await auto_scroll(page, times=2)
-        return await page.evaluate(_EXTRACT_JS, limit)
+# 翻页是 SPA 重渲染（URL 不变）。点完右箭头等"首卡片 id 变化"，最多 8s；
+# 超时返回 false（大概率是最后一页重渲染失败或内容未变，交给上层去重兜底）。
+_WAIT_PAGE_CHANGE_JS = r"""
+(prevFirstId) => new Promise((resolve) => {
+  const start = Date.now();
+  const tick = () => {
+    const first = document.querySelector('a[href*="/item?id="]');
+    const id = first ? ((first.href || '').match(/id=(\d+)/) || [])[1] : null;
+    if (id && id !== prevFirstId) return resolve(true);
+    if (Date.now() - start > 8000) return resolve(false);
+    setTimeout(tick, 200);
+  };
+  tick();
+})
+"""
 
 
-async def _run(query: str, limit: int) -> dict[str, Any]:
-    payload: dict[str, Any] | None = None
-    for attempt in range(1, AUTH_WALL_ATTEMPTS + 1):
-        raw = await _search_once(query, limit)
-        if not isinstance(raw, dict):
-            raise GoofishError("搜索页返回结构非预期")
-        payload = raw
-        if not _should_retry(raw):
-            break
-        if attempt < AUTH_WALL_ATTEMPTS:
-            await asyncio.sleep(1.5)
+def _first_card_id(items: list[dict[str, Any]]) -> str:
+    """当前页首卡 id——翻页等待的"内容已变化"基准。"""
+    for it in items:
+        item_id = _item_id_from_url(it.get("url", ""))
+        if item_id:
+            return item_id
+    return ""
 
-    assert payload is not None
+
+def _raise_for_failed_page(payload: dict[str, Any]) -> None:
+    """首页级失败（0 卡片）按原语义抛错；翻页途中的失败由调用方优雅终止。"""
     items = payload.get("items") or []
     # "登录后" 在页脚也会出现——只有在"没拿到卡片 && 命中关键词"时才判定 auth 失败
     if not items and payload.get("requiresAuth"):
         raise AuthRequiredError("www.goofish.com 搜索结果页要求登录，cookies 可能失效")
     if not items and payload.get("blocked"):
         raise GoofishError("搜索页返回验证码/安全验证（触发风控），稍后重试或换账号")
-
     if not items and not payload.get("empty"):
         preview = (payload.get("bodyPreview") or "")[:200]
         raise GoofishError(
             f"未在搜索页上解析到任何卡片，可能 DOM 结构已变。"
             f"页面文案预览：{preview!r}"
         )
+
+
+async def _run(query: str, limit: int, pages: int) -> dict[str, Any]:
+    url = _build_search_url(query)
+
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    fetched_pages = 0
+    total_pages: int | None = None
+
+    async with goofish_page() as page:
+        # ---- 第 1 页（保留瞬时登录墙重试：整页重新导航）----
+        payload: dict[str, Any] | None = None
+        for attempt in range(1, AUTH_WALL_ATTEMPTS + 1):
+            await page.goto(url, wait_until="domcontentloaded")
+            await page.wait_for_timeout(2000)
+            await auto_scroll(page, times=2)
+            raw = await page.evaluate(_EXTRACT_JS, MAX_LIMIT)
+            if not isinstance(raw, dict):
+                raise GoofishError("搜索页返回结构非预期")
+            payload = raw
+            # 拿到卡片 / 明确的空结果 / 明确的风控页都不需要重试
+            if raw.get("items") or raw.get("empty") or raw.get("blocked"):
+                break
+            if attempt < AUTH_WALL_ATTEMPTS:
+                await asyncio.sleep(1.5)
+
+        assert payload is not None
+        _raise_for_failed_page(payload)
+
+        for it in payload.get("items") or []:
+            item_id = _item_id_from_url(it.get("url", ""))
+            if item_id and item_id in seen:
+                continue
+            if item_id:
+                seen.add(item_id)
+            items.append(it)
+        fetched_pages = 1
+        cur_first_id = _first_card_id(payload.get("items") or [])
+
+        # ---- 翻页：点右箭头 → 等重渲染 → 去重累积 ----
+        while fetched_pages < pages and len(items) < limit:
+            pag = await page.evaluate(_PAGINATION_JS)
+            if total_pages is None and pag.get("totalPages") is not None:
+                total_pages = pag["totalPages"]
+            if not pag.get("hasNext"):
+                break
+
+            arrow = page.locator('[class*="pagination-arrow-container"]').nth(1)
+            try:
+                await arrow.click(timeout=5000)
+            except Exception:  # noqa: BLE001 — 箭头消失/被遮挡按最后一页处理
+                break
+            await page.evaluate(_WAIT_PAGE_CHANGE_JS, cur_first_id)
+            await page.wait_for_timeout(PAGE_STABLE_MS)
+
+            nxt = await page.evaluate(_EXTRACT_JS, MAX_LIMIT)
+            if not isinstance(nxt, dict):
+                break
+            fresh = [
+                it
+                for it in (nxt.get("items") or [])
+                if _item_id_from_url(it.get("url", "")) not in seen
+            ]
+            if not fresh:
+                break  # 重渲染失败 / 重复页：防御性终止，返回已有结果
+            cur_first_id = _first_card_id(fresh)
+            for it in fresh:
+                item_id = _item_id_from_url(it.get("url", ""))
+                if item_id:
+                    seen.add(item_id)
+                items.append(it)
+            fetched_pages += 1
+
+        # 循环提前退出（到 limit / 末页）时补一次终态读取
+        if total_pages is None:
+            pag = await page.evaluate(_PAGINATION_JS)
+            total_pages = pag.get("totalPages")
 
     items = items[:limit]
     return {
@@ -165,25 +283,32 @@ async def _run(query: str, limit: int) -> dict[str, Any]:
             for i, it in enumerate(items)
         ],
         "total": len(items),
-        "query": query,
+        "pages_fetched": fetched_pages,
+        "pages_total": total_pages,
+        "query": "",
     }
 
 
 @command(
     namespace="search",
     name="items",
-    description="搜索闲鱼商品（浏览器路径，抗风控）",
+    description="搜索闲鱼商品（浏览器路径，抗风控；--pages 跨页抓取）",
     strategy=Strategy.COOKIE,
     columns=["rank", "item_id", "title", "price", "condition", "brand", "location", "badge", "url"],
 )
-def search(query: str, limit: int = 20) -> dict[str, Any]:
-    return asyncio.run(_run(str(query).strip(), _normalize_limit(limit)))
+def search(query: str, limit: int = DEFAULT_LIMIT, pages: int = 1) -> dict[str, Any]:
+    q = str(query).strip()
+    result = asyncio.run(_run(q, _normalize_limit(limit), _normalize_pages(pages)))
+    result["query"] = q
+    return result
 
 
 __test__ = {
     "MAX_LIMIT": MAX_LIMIT,
+    "MAX_PAGES": MAX_PAGES,
     "AUTH_WALL_ATTEMPTS": AUTH_WALL_ATTEMPTS,
     "_normalize_limit": _normalize_limit,
+    "_normalize_pages": _normalize_pages,
     "_build_search_url": _build_search_url,
     "_item_id_from_url": _item_id_from_url,
     "_should_retry": _should_retry,
