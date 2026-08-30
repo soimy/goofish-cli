@@ -34,3 +34,8 @@ def test_build_search_url_encodes_query():
 )
 def test_item_id_from_url(url, expected):
     assert t["_item_id_from_url"](url) == expected
+
+
+def test_auth_wall_attempts_is_two():
+    """瞬时登录墙重试：总尝试 2 次（首次 + 1 次退避重试）。"""
+    assert t["AUTH_WALL_ATTEMPTS"] == 2

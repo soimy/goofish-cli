@@ -34,24 +34,22 @@ from goofish_cli.core.session import Session
 
 PROFILES_PARENT = Path.home() / ".goofish-cli" / "profiles"
 
-# 需要种的域。goofish.com 下的 cookie 只在 .goofish.com 生效，
-# 但淘系签名链路依赖的 _m_h5_tk / x5sec / sgcookie 历史上会跨 .taobao.com。
-# playwright 的 add_cookies 要求显式 domain，所以我们按 cookie 名分发。
-_TAOBAO_COOKIE_NAMES = {"_m_h5_tk", "_m_h5_tk_enc", "x5sec", "sgcookie", "cookie2", "_tb_token_"}
-
-
-def _split_cookie_domain(name: str) -> str:
-    """按 cookie 名字反推它归属哪个域。
-
-    名字明显是淘系签名链（_m_h5_tk / x5sec / cookie2 / sgcookie）的 → `.taobao.com`，
-    其余一律当 goofish 下：`.goofish.com`。实际浏览器里这些 cookie 是从
-    `api.m.taobao.com` 和 `www.goofish.com` 分头写入的，所以灌的时候也要分头。
-    """
-    return ".taobao.com" if name in _TAOBAO_COOKIE_NAMES else ".goofish.com"
+# 需要种的域。淘系签名链路（_m_h5_tk / x5sec / sgcookie / cookie2）历史上跨
+# .taobao.com，而 www.goofish.com 页面自己的登录态判定读的是 .goofish.com 域上的
+# 会话 cookie（unb / tracknick / tfstk / xlly_s 等）。
+# 实测（2026-08 探针）：按名字单域分发时，16 个会话 cookie 全落 .goofish.com、
+# 页面导航栏仍显示"登录"（匿名态偶发整页登录墙）；把全部 cookie 同时种到两个域
+# （对齐真实浏览器里淘系双域都落 cookie 的形态）后页面恢复登录态，搜索稳定出卡片。
+# 浏览器发请求时本就只带 host 匹配的 cookie，双域冗余无害。
+_COOKIE_DOMAINS = (".taobao.com", ".goofish.com")
 
 
 def _cookies_to_playwright(cookies: dict[str, str]) -> list[dict[str, Any]]:
-    """把 `{name: value}` 转成 playwright `add_cookies` 需要的列表形态。"""
+    """把 `{name: value}` 转成 playwright `add_cookies` 需要的列表形态。
+
+    每个 cookie 双域各注入一份：浏览器发请求时按 host 匹配自动挑选，
+    规避"按名字猜域"单域分发导致的页面登录态判定失败。
+    """
     now = int(__import__("time").time())
     # 7 天后过期——cookies.json 自身会被 Session 层更新，这里只要够跑完当前命令就行
     expires = now + 7 * 24 * 3600
@@ -59,16 +57,17 @@ def _cookies_to_playwright(cookies: dict[str, str]) -> list[dict[str, Any]]:
     for name, value in cookies.items():
         if not value:
             continue
-        out.append({
-            "name": name,
-            "value": value,
-            "domain": _split_cookie_domain(name),
-            "path": "/",
-            "expires": expires,
-            "httpOnly": False,
-            "secure": True,
-            "sameSite": "None",
-        })
+        for domain in _COOKIE_DOMAINS:
+            out.append({
+                "name": name,
+                "value": value,
+                "domain": domain,
+                "path": "/",
+                "expires": expires,
+                "httpOnly": False,
+                "secure": True,
+                "sameSite": "None",
+            })
     return out
 
 
