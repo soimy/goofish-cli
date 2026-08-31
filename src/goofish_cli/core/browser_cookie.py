@@ -81,7 +81,7 @@ def _get_loader(browser: str):
 
 # ── 单个浏览器的 in-process / subprocess 双路 ────────────────────────────
 
-def _extract_in_process(browser: str) -> dict[str, str] | None:
+def _extract_in_process(browser: str) -> list[dict[str, str]] | None:
     """直接 import browser_cookie3 调 loader。
 
     注意：对 `BrowserCookieError`（未知浏览器名）会直接 re-raise，让调用方
@@ -99,7 +99,7 @@ def _extract_in_process(browser: str) -> dict[str, str] | None:
     return _jars_to_dict(jars)
 
 
-def _extract_via_subprocess(browser: str) -> dict[str, str] | None:
+def _extract_via_subprocess(browser: str) -> list[dict[str, str]] | None:
     """fork 子进程跑 browser_cookie3。macOS Keychain 对主进程和子进程的
     授权作用域有时不一致，子进程兜底能救一些 Edge Case（也是 xhs-cli 的做法）。
 
@@ -120,16 +120,16 @@ loader = getattr(bc3, browser, None)
 if not loader or not callable(loader):
     print(json.dumps({"error": f"unknown-browser:{browser}"})); sys.exit(0)
 
-out = {}
+out = []
 for d in domains:
     try:
         for c in loader(domain_name=d):
             host = (c.domain or "").lstrip(".")
             if any(h in host for h in hosts):
-                out[c.name] = c.value
+                out.append({"name": c.name, "value": c.value, "domain": c.domain or ""})
     except Exception as e:
         print(json.dumps({"error": f"extract-fail:{e}"})); sys.exit(0)
-print(json.dumps({"cookies": out}))
+print(json.dumps({"cookies": {r["name"]: r["value"] for r in out}, "_v2": out}))
 '''
     try:
         result = subprocess.run(
@@ -161,19 +161,32 @@ print(json.dumps({"cookies": out}))
         logger.trace(f"{browser} subprocess 抽取失败：{data['error']}")
         return None
 
+    v2 = data.get("_v2")
+    if v2:
+        return v2
     return data.get("cookies") or None
 
 
-def _jars_to_dict(jars: list[Any]) -> dict[str, str]:
-    """从多个 CookieJar 合并筛出阿里系域 cookie。"""
-    out: dict[str, str] = {}
+def _jars_to_dict(jars: list[Any]) -> list[dict[str, str]]:
+    """从多个 CookieJar 合并筛出阿里系域 cookie，保留 domain 来源。
+
+    返回 [{"name": ..., "value": ..., "domain": ...}, ...]，按 (name, domain) 去重。
+    """
+    seen: set[tuple[str, str]] = set()
+    out: list[dict[str, str]] = []
     for jar in jars:
         for cookie in jar:
             host = (cookie.domain or "").lstrip(".")
             if not any(h in host for h in ALLOWED_HOSTS):
                 continue
-            # 同名后写覆盖前 —— 这里没法判优先级，实测取到 unb/_m_h5_tk 都 OK
-            out[cookie.name] = cookie.value
+            key = (cookie.name, cookie.domain or "")
+            if key not in seen:
+                seen.add(key)
+                out.append({
+                    "name": cookie.name,
+                    "value": cookie.value,
+                    "domain": cookie.domain or "",
+                })
     return out
 
 
@@ -196,8 +209,9 @@ def _try_browser(browser: str) -> dict[str, str] | None:
     return None
 
 
-def _is_valid(cookies: dict[str, str]) -> bool:
-    return all(k in cookies and cookies[k] for k in REQUIRED_KEYS)
+def _is_valid(cookies: list[dict[str, str]] | dict[str, str]) -> bool:
+    flat = {r["name"]: r["value"] for r in cookies} if isinstance(cookies, list) else cookies
+    return all(k in flat and flat[k] for k in REQUIRED_KEYS)
 
 
 # ── 对外主入口 ────────────────────────────────────────────────────────────
@@ -206,7 +220,7 @@ def extract_goofish_cookies(
     browser: str = "auto",
     *,
     max_workers: int = 4,
-) -> tuple[str, dict[str, str]]:
+) -> tuple[str, list[dict[str, str]]]:
     """抽闲鱼登录态。
 
     返回 (browser_name, cookies)。

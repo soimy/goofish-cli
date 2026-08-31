@@ -39,3 +39,19 @@ def test_item_id_from_url(url, expected):
 def test_auth_wall_attempts_is_two():
     """瞬时登录墙重试：总尝试 2 次（首次 + 1 次退避重试）。"""
     assert t["AUTH_WALL_ATTEMPTS"] == 2
+
+
+def test_should_retry():
+    """零卡片且 requiresAuth 为真才重试（瞬时登录墙兜底）。
+
+    注意 `_EXTRACT_JS` 恒返回 `items` 键：真实登录墙载荷是
+    `{"items": [], "requiresAuth": True, ...}`，必须重试。
+    """
+    should_retry = t["_should_retry"]
+    assert should_retry({"items": [{"id": 1}]}) is False
+    assert should_retry({}) is False
+    assert should_retry({"requiresAuth": True}) is True
+    assert should_retry({"requiresAuth": False}) is False
+    assert should_retry({"items": [], "requiresAuth": True}) is True
+    assert should_retry({"items": [], "requiresAuth": True, "empty": True}) is True
+    assert should_retry({"items": [], "requiresAuth": True, "blocked": True}) is True

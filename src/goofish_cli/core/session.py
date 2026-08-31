@@ -10,9 +10,10 @@
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import requests
@@ -41,31 +42,46 @@ USER_AGENT = (
 )
 
 
+def _records_to_flat(records: list[dict[str, str]]) -> dict[str, str]:
+    """提取 records 中 {name, value} 为 flat dict，供 requests jar 使用。"""
+    return {r["name"]: r["value"] for r in records if r.get("value")}
+
+
+def _coerce_records(cookies) -> list[dict[str, str]]:
+    """dict | list → list[Record]。dict 时填充 domain=''（legacy 格式）。"""
+    if isinstance(cookies, list):
+        return [r if r.get("domain") is not None else {**r, "domain": ""} for r in cookies]
+    return [{"name": k, "value": v, "domain": ""} for k, v in cookies.items() if v]
+
+
 @dataclass
 class Session:
     http: requests.Session
     unb: str
     tracknick: str
     device_id: str
+    cookie_records: list[dict[str, str]] = field(default_factory=list)
 
     @classmethod
     def load(cls, cookie_path: Path | str | None = None) -> Session:
         path = resolve_cookie_path(cookie_path)
 
-        cookies = _load_or_bootstrap_cookies(path)
+        records = _load_or_bootstrap_cookies(path)  # now list[Record]
+        flat = _records_to_flat(records)
 
-        if "unb" not in cookies or "_m_h5_tk" not in cookies:
+        if "unb" not in flat or "_m_h5_tk" not in flat:
             raise AuthRequiredError(
                 f"cookie 缺失 unb / _m_h5_tk，检查 {path} 是否完整（建议先在浏览器登录 "
                 f"https://www.goofish.com 后再试 `goofish auth login`）"
             )
         http = requests.Session()
-        http.cookies.update(cookies)
+        http.cookies.update(flat)
         return cls(
             http=http,
-            unb=cookies["unb"],
-            tracknick=cookies.get("tracknick", ""),
-            device_id=_load_or_mint_device_id(cookies["unb"]),
+            unb=flat["unb"],
+            tracknick=flat.get("tracknick", ""),
+            device_id=_load_or_mint_device_id(flat["unb"]),
+            cookie_records=records,
         )
 
     @property
@@ -74,7 +90,7 @@ class Session:
         return raw.split("_")[0] if raw else ""
 
 
-def _load_or_bootstrap_cookies(path: Path) -> dict[str, str]:
+def _load_or_bootstrap_cookies(path: Path) -> list[dict[str, str]]:
     """先查本地 cookies.json；没有就从本机浏览器自动导入一次写盘。"""
     if path.exists():
         cookies = _load_cookies(path)
@@ -101,29 +117,34 @@ def _load_or_bootstrap_cookies(path: Path) -> dict[str, str]:
             f"或手动导出 JSON：`goofish auth login <path>`。"
         ) from e
 
+    # coerce：browser_cookie.py 已改为返回 list[Record]，但保留对 flat dict 的兼容
+    records = _coerce_records(cookies)
+
     # 写盘前最后一道校验：bootstrap 回来的 cookies 必须含 REQUIRED_KEYS，
     # 否则坚决不落盘——避免半残 cookie 污染后续每次 Session.load。
-    if "unb" not in cookies or "_m_h5_tk" not in cookies:
+    flat = _records_to_flat(records)
+    if "unb" not in flat or "_m_h5_tk" not in flat:
         raise AuthRequiredError(
             f"已从 {browser} 拿到 cookie，但缺 unb / _m_h5_tk 关键字段，"
             f"未写入 {path}。请在 {browser} 里重新登录 https://www.goofish.com 后重试。"
         )
 
-    write_cookies_json(path, cookies)
+    write_cookies_json(path, records)
     logger.info(f"已从 {browser} 自动导入登录态 → {path}")
-    return cookies
+    return records
 
 
-def _bootstrap_from_browser() -> tuple[str, dict[str, str]]:
+def _bootstrap_from_browser() -> tuple[str, list[dict[str, str]]]:
     """单独封装一层，方便测试时 monkeypatch。"""
     from goofish_cli.core.browser_cookie import extract_goofish_cookies
     return extract_goofish_cookies(browser="auto")
 
 
-def write_cookies_json(path: Path, cookies: dict[str, str]) -> None:
-    """把 cookies dict 加密落盘。供 auth login / refresh / qr_login 复用。"""
+def write_cookies_json(path: Path, cookies) -> None:
+    """cookies 可为 {name: value} dict 或 list[Record]。"""
+    records = _coerce_records(cookies) if isinstance(cookies, dict) else cookies
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(encrypt_cookies(cookies))
+    path.write_bytes(encrypt_cookies(records))
     path.chmod(0o600)
 
 
@@ -148,26 +169,21 @@ def _load_or_mint_device_id(unb: str) -> str:
     return device_id
 
 
-def _load_cookies(path: Path) -> dict[str, str]:
+def _load_cookies(path: Path) -> list[dict[str, str]]:
     raw_bytes = path.read_bytes()
-    # 优先尝试加密格式解密
-    try:
-        return decrypt_cookies(raw_bytes)
-    except (ValueError, Exception):  # noqa: BLE001
-        pass
-    # fallback: 明文 JSON（兼容旧版本或手动导出的文件）
-    try:
-        raw = json.loads(raw_bytes)
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        raise AuthRequiredError(f"cookie 文件格式不识别（非加密也非 JSON）：{path}") from e
-    if isinstance(raw, list):
-        return {c["name"]: c["value"] for c in raw if "name" in c and "value" in c}
-    if isinstance(raw, dict):
-        return {str(k): str(v) for k, v in raw.items()}
-    raise AuthRequiredError(f"cookies.json 格式不识别：{path}")
+    # 优先尝试解密（加密格式或明文 JSON）
+    data: dict | list | None = None
+    with contextlib.suppress(Exception):
+        data = decrypt_cookies(raw_bytes)
+    if data is None:
+        try:
+            data = json.loads(raw_bytes)
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            raise AuthRequiredError(f"cookie 文件格式不识别：{path}") from e
+    return _coerce_records(data)
 
 
-def _maybe_migrate_to_encrypted(path: Path, cookies: dict[str, str]) -> None:
+def _maybe_migrate_to_encrypted(path: Path, cookies: list[dict[str, str]]) -> None:
     """如果文件是明文 JSON，自动加密覆盖。"""
     try:
         raw = path.read_bytes()

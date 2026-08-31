@@ -16,6 +16,10 @@ def _make_session(cookies: dict[str, str]) -> Session:
     return Session(http=http, unb=cookies.get("unb", ""), tracknick="", device_id="dev")
 
 
+def _rec(name: str, value: str, domain: str = ".goofish.com") -> dict[str, str]:
+    return {"name": name, "value": value, "domain": domain}
+
+
 def _fake_run(result):
     """模拟 asyncio.run：close 掉传入的 coroutine（避免 unawaited warning）后返回结果。"""
     def _inner(coro):
@@ -39,7 +43,7 @@ def test_refresh_merges_new_cookies_and_dedupes_same_name(tmp_path, monkeypatch)
     # 通过 GOOFISH_COOKIES_PATH 让 resolve_cookie_path 指到测试临时路径
     monkeypatch.setenv("GOOFISH_COOKIES_PATH", str(tmp_path / "cookies.json"))
 
-    fresh = {"_m_h5_tk": "new_2", "unb": "u1", "cookie2": "c3", "x5sec": "x"}
+    fresh = [_rec("_m_h5_tk", "new_2"), _rec("unb", "u1"), _rec("cookie2", "c3"), _rec("x5sec", "x")]
     with patch.object(refresh, "asyncio") as mock_async:
         mock_async.run.side_effect = _fake_run(fresh)
         ok = refresh.refresh_cookies_via_browser(session)
@@ -58,7 +62,7 @@ def test_refresh_fails_when_required_keys_missing(tmp_path, monkeypatch):
     monkeypatch.setenv("GOOFISH_COOKIES_PATH", str(tmp_path / "cookies.json"))
 
     with patch.object(refresh, "asyncio") as mock_async:
-        mock_async.run.side_effect = _fake_run({"foo": "bar"})  # 没 _m_h5_tk / unb
+        mock_async.run.side_effect = _fake_run([_rec("foo", "bar")])  # 没 _m_h5_tk / unb
         ok = refresh.refresh_cookies_via_browser(session)
 
     assert ok is False
@@ -74,7 +78,7 @@ def test_refresh_respects_custom_cookie_path(tmp_path, monkeypatch):
     monkeypatch.setenv("GOOFISH_COOKIES_PATH", str(custom))
 
     session = _make_session({"_m_h5_tk": "old", "unb": "u1"})
-    fresh = {"_m_h5_tk": "new", "unb": "u1", "cookie2": "c"}
+    fresh = [_rec("_m_h5_tk", "new"), _rec("unb", "u1"), _rec("cookie2", "c")]
     with patch.object(refresh, "asyncio") as mock_async:
         mock_async.run.side_effect = _fake_run(fresh)
         ok = refresh.refresh_cookies_via_browser(session)
@@ -91,7 +95,7 @@ def test_refresh_fails_when_cookie2_missing(tmp_path, monkeypatch):
     monkeypatch.setenv("GOOFISH_COOKIES_PATH", str(tmp_path / "cookies.json"))
 
     # fresh 有 _m_h5_tk / unb 但无 cookie2 —— 过去会误判成功，现在必须 False
-    fresh = {"_m_h5_tk": "new", "unb": "u1"}
+    fresh = [_rec("_m_h5_tk", "new"), _rec("unb", "u1")]
     with patch.object(refresh, "asyncio") as mock_async:
         mock_async.run.side_effect = _fake_run(fresh)
         ok = refresh.refresh_cookies_via_browser(session)

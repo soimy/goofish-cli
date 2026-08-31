@@ -62,10 +62,11 @@ def test_extract_single_browser_success(monkeypatch):
 
     used, cookies = bc.extract_goofish_cookies(browser="edge")
     assert used == "edge"
-    assert cookies["unb"] == "test-unb"
-    assert cookies["_m_h5_tk"] == "TOKEN_abc_123"
-    assert cookies["tracknick"] == "test-tracknick"
-    assert "sessionid" not in cookies
+    flat = {c["name"]: c["value"] for c in cookies}
+    assert flat["unb"] == "test-unb"
+    assert flat["_m_h5_tk"] == "TOKEN_abc_123"
+    assert flat["tracknick"] == "test-tracknick"
+    assert "sessionid" not in flat
 
 
 def test_extract_single_browser_missing_required_raises(monkeypatch):
@@ -161,4 +162,7 @@ def test_jars_to_dict_filters_non_alibaba():
         _make_cookie("foo", "bar", ".tmall.com"),
     )
     out = bc._jars_to_dict([jar])
-    assert out == {"unb": "U", "foo": "bar"}
+    assert out == [
+        {"name": "unb", "value": "U", "domain": ".taobao.com"},
+        {"name": "foo", "value": "bar", "domain": ".tmall.com"},
+    ]

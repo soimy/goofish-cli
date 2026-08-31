@@ -19,9 +19,14 @@ from goofish_cli.core.browser import auto_scroll, goofish_page
 from goofish_cli.core.errors import AuthRequiredError, GoofishError
 
 MAX_LIMIT = 50
-# 0 卡片 + 非 empty/blocked 时判定为疑似瞬时登录墙（同一 cookie 注入实测时好时坏），
+# 0 卡片 + requiresAuth 时判定为疑似瞬时登录墙（同一 cookie 注入实测时好时坏），
 # 总尝试次数（含首次）。重试前短暂退避，避免连续两枪都打在风控瞬间。
 AUTH_WALL_ATTEMPTS = 2
+
+
+def _should_retry(payload: dict[str, Any]) -> bool:
+    """零卡片且明确 requiresAuth 时才重试（瞬时登录墙兜底）。"""
+    return not payload.get("items") and bool(payload.get("requiresAuth"))
 
 
 def _normalize_limit(value: Any) -> int:
@@ -133,8 +138,7 @@ async def _run(query: str, limit: int) -> list[dict[str, Any]]:
         if not isinstance(raw, dict):
             raise GoofishError("搜索页返回结构非预期")
         payload = raw
-        # 拿到卡片 / 明确的空结果 / 明确的风控页都不需要重试
-        if raw.get("items") or raw.get("empty") or raw.get("blocked"):
+        if not _should_retry(raw):
             break
         if attempt < AUTH_WALL_ATTEMPTS:
             await asyncio.sleep(1.5)
@@ -154,14 +158,6 @@ async def _run(query: str, limit: int) -> list[dict[str, Any]]:
             f"页面文案预览：{preview!r}"
         )
 
-    return [
-        {
-            "rank": i + 1,
-            "item_id": _item_id_from_url(it.get("url", "")),
-            **it,
-        }
-        for i, it in enumerate(items)
-    ]
 
 
 @command(
@@ -182,4 +178,5 @@ __test__ = {
     "_normalize_limit": _normalize_limit,
     "_build_search_url": _build_search_url,
     "_item_id_from_url": _item_id_from_url,
+    "_should_retry": _should_retry,
 }

@@ -22,14 +22,14 @@ def _machine_key() -> bytes:
     return __import__("base64").urlsafe_b64encode(dk)
 
 
-def encrypt_cookies(cookies: dict[str, str]) -> bytes:
-    payload = json.dumps(cookies, ensure_ascii=False).encode()
+def encrypt_cookies(data: dict | list) -> bytes:
+    payload = json.dumps(data, ensure_ascii=False).encode()
     return Fernet(_machine_key()).encrypt(payload)
 
 
-def decrypt_cookies(data: bytes) -> dict[str, str]:
+def decrypt_cookies(raw: bytes) -> dict | list:
     try:
-        plain = Fernet(_machine_key()).decrypt(data)
+        plain = Fernet(_machine_key()).decrypt(raw)
     except InvalidToken as e:
         raise ValueError("cookie 解密失败（可能在其他机器上加密的）") from e
     return json.loads(plain)

@@ -68,22 +68,22 @@ async def _try_quick_enter(page: Any) -> bool:
         return False
 
 
-async def _refresh_async(cookies: dict[str, str]) -> dict[str, str]:
+async def _refresh_async(inject: list[dict[str, str]]) -> list[dict[str, str]]:
     # 延迟 import：测试环境没装 playwright 也能 import refresh 模块
     from goofish_cli.core.browser import goofish_page
 
     # 显式传 cookies——让 Playwright context 注入**调用方当前 session** 的登录态，
     # 而不是让 goofish_page 再走一次 Session.load() 从磁盘拉（内存里可能已被改）。
-    async with goofish_page(cookies=cookies) as page:
+    async with goofish_page(cookies=inject) as page:
         await page.goto(HOME_URL, wait_until="domcontentloaded")
         # 给弹窗 + mtop h5 sign 一些时间渲染
         await page.wait_for_timeout(1500)
 
         # 有弹窗但"快速进入"不可用 → 浏览器免密记忆彻底失效，后续 goto /bought
-        # 也只会被跳登录页。直接返回空 dict 让上层报原始 AuthRequiredError，
+        # 也只会被跳登录页。直接返回空列表让上层报原始 AuthRequiredError，
         # 避免返回"只更新了 _m_h5_tk 但 session 仍失效"的假成功 cookies。
         if not await _try_quick_enter(page):
-            return {}
+            return []
 
         # 访问强鉴权页，触发服务端下发完整 session cookies（cookie2 / sgcookie /
         # _tb_token_ 会被 Set-Cookie 刷新）。
@@ -93,9 +93,8 @@ async def _refresh_async(cookies: dict[str, str]) -> dict[str, str]:
         except Exception as e:  # noqa: BLE001
             logger.debug(f"[refresh] goto {AUTH_PROBE_URL} 异常（忽略）：{e}")
 
-        pw_cookies = await page.context.cookies()
-
-    return {c["name"]: c["value"] for c in pw_cookies if c.get("name") and c.get("value")}
+        # Playwright 原生格式即 records（带 domain），直接透传给上层
+        return [c for c in await page.context.cookies() if c.get("name") and c.get("value")]
 
 
 def is_enabled() -> bool:
@@ -108,39 +107,51 @@ def refresh_cookies_via_browser(session: Session, *, persist: bool = True) -> bo
     流程见模块 docstring。成功返回 True，否则 False（调用方按 False 走原始
     AuthRequiredError 让上层报给用户）。
     """
-    current = {name: value for name, value in session.http.cookies.items() if value}
+    from .session import _records_to_flat
+
+    # 注入：优先 session.cookie_records（带 domain），无则 fallback 展平 jar
+    inject = session.cookie_records or [
+        {"name": name, "value": value, "domain": ""}
+        for name, value in session.http.cookies.items()
+        if value
+    ]
+
     try:
-        fresh = asyncio.run(_refresh_async(current))
+        fresh_records = asyncio.run(_refresh_async(inject))
     except Exception as e:  # noqa: BLE001 — Playwright 起不来、Chrome 未装、超时等都走这里
         logger.warning(f"用 Playwright 刷 cookie 失败：{e}")
         return False
 
-    missing = [k for k in _REQUIRED_FRESH_COOKIES if k not in fresh]
+    flat = _records_to_flat(fresh_records)
+    missing = [k for k in _REQUIRED_FRESH_COOKIES if k not in flat]
     if missing:
         logger.warning(
             f"刷 cookie 后仍缺关键字段 {missing}（可能'快速进入'未成功或 session 未下发），"
-            f"跳过合并（拿到 {len(fresh)} 个 cookie）"
+            f"跳过合并（拿到 {len(flat)} 个 cookie）"
         )
         return False
 
-    # 关键：直接 `update(fresh)` 会造成跨 domain 同名 cookie 并存（如 .goofish.com 下
+    # 关键：直接 `update(flat)` 会造成跨 domain 同名 cookie 并存（如 .goofish.com 下
     # 一份旧 _m_h5_tk + Playwright 又写入一份新的），后续 `cookies.get(name)` 会抛
     # "There are multiple cookies with name"。所以先删掉所有将被更新的 name 的旧条目。
-    names_to_refresh = set(fresh.keys())
+    names_to_refresh = set(flat.keys())
     for cookie in list(session.http.cookies):
         if cookie.name in names_to_refresh:
             session.http.cookies.clear(domain=cookie.domain, path=cookie.path, name=cookie.name)
-    session.http.cookies.update(fresh)
+    session.http.cookies.update(flat)
 
     if persist:
-        # 尊重 GOOFISH_COOKIES_PATH —— 用户配置了自定义路径时不能写默认路径后再下次
-        # Session.load 又去读自定义路径，造成"刷新了但下次启动又回到旧的"。
         path = resolve_cookie_path()
-        # 此时 session.http.cookies 已没有同名冲突，安全转 dict
-        merged = {**dict(session.http.cookies), **fresh}
+        # records 合并：fresh 覆盖 old 中 (name, domain) 相同的，old 其余保留
+        fresh_keys = {(r["name"], r["domain"]) for r in fresh_records}
+        merged = [r for r in session.cookie_records if (r["name"], r["domain"]) not in fresh_keys]
+        merged.extend(fresh_records)
         try:
             write_cookies_json(path, merged)
             logger.info(f"cookie 已刷新并写回 {path}")
         except OSError as e:
             logger.debug(f"写回 cookies.json 失败（内存里仍生效）：{e}")
+
+    # 更新 session.cookie_records（内存中同步）
+    session.cookie_records = fresh_records
     return True

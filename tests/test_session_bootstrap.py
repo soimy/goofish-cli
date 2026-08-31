@@ -62,7 +62,9 @@ def test_load_bootstraps_when_missing(fake_cookies_path, monkeypatch):
     # 写盘了（加密格式）
     assert fake_cookies_path.exists()
     data = decrypt_cookies(fake_cookies_path.read_bytes())
-    assert data["unb"] == "U2"
+    # v2 持久化为 list[Record]；legacy flat 走 _coerce_records → domain=''
+    assert {r["name"]: r["value"] for r in data} == fake
+    assert all(r["domain"] == "" for r in data)
     # 文件权限 0o600
     assert (fake_cookies_path.stat().st_mode & 0o777) == 0o600
 
@@ -137,10 +139,59 @@ def test_write_cookies_json_format(tmp_path):
     # 加密文件不应是明文 JSON
     with pytest.raises((json.JSONDecodeError, UnicodeDecodeError)):
         json.loads(raw)
-    # 解密后内容正确
+    # 解密后内容正确（v2 持久化为 list[Record]，flat dict 经 _coerce_records 转 records）
     data = decrypt_cookies(raw)
-    assert data == {"a": "1", "b": "2"}
+    assert {r["name"]: r["value"] for r in data} == {"a": "1", "b": "2"}
     assert (target.stat().st_mode & 0o777) == 0o600
+
+
+def test_cookie_records_preserves_domain_from_bootstrap(tmp_path, monkeypatch):
+    """bootstrap 走 browser_cookie.py → records 带 domain，Session.cookie_records 保留之。"""
+    cookies_path = tmp_path / "cookies.json"
+    device_path = tmp_path / "device.json"
+    monkeypatch.setattr(session_mod, "DEFAULT_COOKIE_PATH", cookies_path)
+    monkeypatch.setattr(session_mod, "DEVICE_CACHE_PATH", device_path)
+    monkeypatch.delenv("GOOFISH_COOKIES_PATH", raising=False)
+
+    # records 形态：unb/tracknick 在 .goofish.com，_m_h5_tk 在 .taobao.com
+    fake_records = [
+        {"name": "unb", "value": "U9", "domain": ".goofish.com"},
+        {"name": "tracknick", "value": "nick9", "domain": ".goofish.com"},
+        {"name": "_m_h5_tk", "value": "T_x_1", "domain": ".taobao.com"},
+    ]
+    monkeypatch.setattr(
+        session_mod, "_bootstrap_from_browser",
+        lambda: ("edge", fake_records),
+    )
+
+    # 第一次 load 触发 bootstrap → 落盘
+    session_mod.Session.load()
+    # 落盘后 decrypt 出来应是 records（v2 持久化）
+    data = decrypt_cookies(cookies_path.read_bytes())
+    assert isinstance(data, list)
+    # 重新 load 走加密文件路径时 domain 也应保留
+    s2 = session_mod.Session.load()
+    by_name_domain = {(r["name"], r["domain"]): r["value"] for r in s2.cookie_records}
+    assert by_name_domain[("unb", ".goofish.com")] == "U9"
+    assert by_name_domain[("_m_h5_tk", ".taobao.com")] == "T_x_1"
+
+
+def test_legacy_flat_dict_decrypts_to_domain_empty_records(tmp_path, monkeypatch):
+    """旧版 flat dict cookies.json 仍能 load；records 形式为 domain=''.（兼容性回归）"""
+    cookies_path = tmp_path / "cookies.json"
+    device_path = tmp_path / "device.json"
+    monkeypatch.setattr(session_mod, "DEFAULT_COOKIE_PATH", cookies_path)
+    monkeypatch.setattr(session_mod, "DEVICE_CACHE_PATH", device_path)
+    monkeypatch.delenv("GOOFISH_COOKIES_PATH", raising=False)
+
+    # 写入 legacy 加密 flat dict
+    session_mod.write_cookies_json(cookies_path, {"unb": "UL", "_m_h5_tk": "TL_x_1"})
+
+    s = session_mod.Session.load()
+    assert s.unb == "UL"
+    # 旧文件没有 domain 信息，所以 records 全部 domain=''
+    assert all(r["domain"] == "" for r in s.cookie_records)
+    assert {r["name"] for r in s.cookie_records} == {"unb", "_m_h5_tk"}
 
 
 def test_plaintext_migration_to_encrypted(fake_cookies_path, monkeypatch):
@@ -163,4 +214,5 @@ def test_plaintext_migration_to_encrypted(fake_cookies_path, monkeypatch):
     with pytest.raises((json.JSONDecodeError, UnicodeDecodeError)):
         json.loads(raw)
     data = decrypt_cookies(raw)
-    assert data["unb"] == "U1"
+    flat = {r["name"]: r["value"] for r in data}
+    assert flat["unb"] == "U1"
