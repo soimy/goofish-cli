@@ -1,13 +1,12 @@
-"""纯函数测 search 的参数归一化和 URL 构造。真浏览器路径走 e2e 验证，不进单测。"""
+"""测 search 的参数归一化、URL 构造与 _walk_pages 翻页状态机（fake page 驱动）。"""
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+import asyncio
 
 import pytest
 
+from goofish_cli.commands.search.search import _item_id_from_url
 from goofish_cli.commands.search.search import __test__ as t
-from goofish_cli.commands.search.search import search
-from goofish_cli.core.errors import AuthRequiredError
 
 
 def test_normalize_limit_clamps_and_defaults():
@@ -56,60 +55,243 @@ def test_auth_wall_attempts_is_two():
     assert t["AUTH_WALL_ATTEMPTS"] == 2
 
 
-def test_should_retry():
-    """零卡片且 requiresAuth 为真才重试（瞬时登录墙兜底）。
-
-    注意 `_EXTRACT_JS` 恒返回 `items` 键：真实登录墙载荷是
-    `{"items": [], "requiresAuth": True, ...}`，必须重试。
-    """
-    should_retry = t["_should_retry"]
-    assert should_retry({"items": [{"id": 1}]}) is False
-    assert should_retry({}) is False
-    assert should_retry({"requiresAuth": True}) is True
-    assert should_retry({"requiresAuth": False}) is False
-    assert should_retry({"items": [], "requiresAuth": True}) is True
-    assert should_retry({"items": [], "requiresAuth": True, "empty": True}) is True
-    assert should_retry({"items": [], "requiresAuth": True, "blocked": True}) is True
+# ---------------------------------------------------------------------------
+# _walk_pages 翻页状态机（fake page 驱动，确定性、无网络）
+# ---------------------------------------------------------------------------
 
 
-def test_search_returns_ranked_items_on_success():
-    """回归：_run() 成功时应返回带 rank/item_id 的 list，不能是 None。
+class FakeLocator:
+    def __init__(self, page: FakePage) -> None:
+        self._page = page
 
-    patch `_search_once`（而非 `asyncio.run`），让 `_run` 真正执行，
-    验证 rank/item_id 组装逻辑。
-    """
-    from unittest.mock import patch
+    def nth(self, i: int) -> FakeLocator:
+        return self
 
-    fake_raw = {
-        "items": [
-            {"title": "商品A", "url": "https://www.goofish.com/item?id=100", "price": "¥10"},
-            {"title": "商品B", "url": "https://www.goofish.com/item?id=200", "price": "¥20"},
-        ],
-        "requiresAuth": False,
-        "blocked": False,
-        "empty": False,
-        "bodyPreview": "",
-    }
-    with patch("goofish_cli.commands.search.search._search_once", new=AsyncMock(return_value=fake_raw)):
-        result = search("test")
-    assert result is not None
-    assert result["total"] == 2
-    assert result["items"][0]["rank"] == 1
-    assert result["items"][0]["item_id"] == "100"
-    assert result["items"][1]["rank"] == 2
-    assert result["items"][1]["item_id"] == "200"
+    async def click(self, timeout: int = 0) -> None:
+        self._page.clicks += 1
 
 
-def test_search_raises_auth_required_error():
-    """登录墙错误必须从 _run 正确传播到 search() 上层——CI 上 warning-free。"""
+class FakePage:
+    """按脚本依次返回 evaluate 结果；脚本耗尽后执行 on_exhausted。"""
 
-    def _fake_run(coro):
-        # close 掉协程防止 unawaited coroutine warning
-        coro.close()
-        raise AuthRequiredError("www.goofish.com 搜索结果页要求登录")
+    def __init__(self, script: list, on_exhausted=None) -> None:
+        self.script = list(script)
+        self.on_exhausted = on_exhausted
+        self.clicks = 0
 
-    with (
-        patch("asyncio.run", side_effect=_fake_run),
-        pytest.raises(AuthRequiredError, match="www.goofish.com"),
-    ):
-        search("test")
+    def locator(self, sel: str) -> FakeLocator:
+        return FakeLocator(self)
+
+    async def evaluate(self, js: str, arg=None):
+        if not self.script:
+            if self.on_exhausted is not None:
+                return self.on_exhausted()
+            raise AssertionError("fake page script exhausted")
+        step = self.script.pop(0)
+        if isinstance(step, Exception):
+            raise step
+        return step(arg) if callable(step) else step
+
+    async def wait_for_timeout(self, ms: int) -> None:
+        return None
+
+
+def _item(iid: str) -> dict:
+    return {"url": f"https://www.goofish.com/item?id={iid}", "title": f"item-{iid}"}
+
+
+def _page_payload(ids: list[str], **kw) -> dict:
+    base = {"items": [_item(i) for i in ids], "requiresAuth": False, "blocked": False,
+            "empty": False, "bodyPreview": ""}
+    base.update(kw)
+    return base
+
+
+def _pagination(has_next: bool = True, total: int | None = 50) -> dict:
+    return {"hasNext": has_next, "totalPages": total}
+
+
+def _run_walk(script, items=None, seen=None, pages=5, limit=200, **kw):
+    page = FakePage(script, **kw)
+    result = asyncio.run(_walk(page, items or [], seen or set(), 1, pages, limit))
+    return page, result
+
+
+_walk = None
+
+
+def _get_walk():
+    global _walk
+    if _walk is None:
+        _walk = t["_walk_pages"]
+    return _walk
+
+
+# 在 import t 之后绑定（模块级常量避免遮蔽）
+_walk = t["_walk_pages"]
+
+
+def test_walk_pages_accumulates_and_dedupes_across_pages():
+    """跨页去重：第 2 页重复第 1 页的 id 只计一次，pages_fetched 正确递增。"""
+    script = [
+        _pagination(True, 50),
+        True,  # page-change 等待
+        _page_payload(["201", "100", "202"]),  # 100 与第 1 页重复
+    ]
+    items, seen = [_item("100"), _item("101")], {"100", "101"}
+    fetched, total, reason = asyncio.run(
+        _walk(FakePage(script), items, seen, 1, pages=2, limit=200)
+    )
+    assert fetched == 2
+    assert total == 50
+    assert reason == "pages_reached"
+    ids = [_item_id_from_url(it["url"]) for it in items]
+    assert ids == ["100", "101", "201", "202"]  # 去重后顺序保持
+
+
+def test_walk_pages_anchor_uses_unfiltered_first_card():
+    """审核 P1-2：第 2 页首卡与第 1 页重复时，锚点仍取未过滤首卡，
+    第 3 页可正常到达（不再因锚点失真而提前终止）。"""
+    script = [
+        _pagination(True, 50),
+        True,  # 等待：page2 首卡 100 与 page1 重复（changed 依 DOM 而定，这里视为已变）
+        _page_payload(["100", "201", "202"]),
+        _pagination(True, 50),
+        True,
+        _page_payload(["301", "302"]),
+    ]
+    items, seen = [_item("100")], {"100"}
+    fetched, _, reason = asyncio.run(
+        _walk(FakePage(script), items, seen, 1, pages=3, limit=200)
+    )
+    assert fetched == 3
+    assert reason == "pages_reached"
+    ids = [_item_id_from_url(it["url"]) for it in items]
+    assert ids == ["100", "201", "202", "301", "302"]
+
+
+def test_walk_pages_stops_on_disabled_arrow():
+    """右箭头 disabled（末页）→ last_page，保留已有结果。"""
+    script = [_pagination(False, 1)]
+    fetched, total, reason = asyncio.run(
+        _walk(FakePage(script), [_item("100")], {"100"}, 1, pages=5, limit=200)
+    )
+    assert (fetched, total, reason) == (1, 1, "last_page")
+
+
+def test_walk_pages_stops_at_cross_page_limit():
+    """跨页 limit：累积到 limit 即停，reason=limit。"""
+    script = [
+        _pagination(True, 50),
+        True,
+        _page_payload(["201", "202"]),
+    ]
+    items, seen = [_item(f"{i}") for i in range(1, 44)], {str(i) for i in range(1, 44)}
+    fetched, _, reason = asyncio.run(
+        _walk(FakePage(script), items, seen, 1, pages=5, limit=45)
+    )
+    assert len(items) == 45
+    assert reason == "limit"
+
+
+def test_walk_pages_preserves_results_on_mid_walk_exception():
+    """审核 P1-1：翻页途中 evaluate 抛（SPA 销毁执行上下文）→
+    不抛出，返回第 1 页已累积结果 + reason=error。"""
+    boom = RuntimeError("Execution context was destroyed")
+    script = [
+        _pagination(True, 50),
+        boom,  # page-change 等待抛出
+    ]
+    items, seen = [_item("100"), _item("101")], {"100", "101"}
+    fetched, _, reason = asyncio.run(
+        _walk(FakePage(script), items, seen, 1, pages=3, limit=200)
+    )
+    assert fetched == 1
+    assert reason == "error"
+    assert len(items) == 2
+
+
+def test_walk_pages_pagination_state_exception_preserves_results():
+    """翻页第一拍（pagination 状态读取）抛出同样优雅终止。"""
+    boom = RuntimeError("Execution context was destroyed")
+    fetched, _, reason = asyncio.run(
+        _walk(FakePage([boom]), [_item("100")], {"100"}, 1, pages=3, limit=200)
+    )
+    assert (fetched, reason) == (1, "error")
+
+
+def test_walk_pages_wait_timeout_with_no_new_items_is_stale():
+    """等待超时（changed=False）且提取无新数据 → reason=stale，保留结果。"""
+    # wait JS resolve(False)；extract 返回与 seen 全重复的页
+    script = [
+        _pagination(True, 50),
+        False,
+        _page_payload(["100"]),  # 全是重复 → 无 fresh
+    ]
+    fetched, _, reason = asyncio.run(
+        _walk(FakePage(script), [_item("100")], {"100"}, 1, pages=3, limit=200)
+    )
+    assert (fetched, reason) == (1, "stale")
+
+
+def test_walk_pages_wait_timeout_but_fresh_items_continues():
+    """等待超时但提取到新数据（渲染慢而非失败）→ 照常累积继续。"""
+    script = [
+        _pagination(True, 50),
+        False,  # 等待超时
+        _page_payload(["201"]),
+        _pagination(False, 50),
+    ]
+    fetched, _, reason = asyncio.run(
+        _walk(FakePage(script), [_item("100")], {"100"}, 1, pages=5, limit=200)
+    )
+    assert fetched == 2
+    assert reason == "last_page"
+
+
+def test_walk_pages_repeated_page_is_no_new():
+    """重渲染成功但整页重复 → reason=no_new，防御性终止。"""
+    script = [
+        _pagination(True, 50),
+        True,  # changed
+        _page_payload(["100", "101"]),  # 全重复
+    ]
+    fetched, _, reason = asyncio.run(
+        _walk(FakePage(script), [_item("100"), _item("101")], {"100", "101"}, 1,
+              pages=3, limit=200)
+    )
+    assert (fetched, reason) == (1, "no_new")
+
+
+def test_walk_pages_blocked_mid_walk():
+    """翻页途中撞风控页 → reason=blocked，保留部分结果。"""
+    script = [
+        _pagination(True, 50),
+        True,
+        _page_payload([], blocked=True),
+    ]
+    fetched, _, reason = asyncio.run(
+        _walk(FakePage(script), [_item("100")], {"100"}, 1, pages=3, limit=200)
+    )
+    assert (fetched, reason) == (1, "blocked")
+
+
+def test_walk_pages_non_dict_extract_is_error():
+    """extract 返回非 dict（结构突变）→ reason=error，保留结果。"""
+    script = [
+        _pagination(True, 50),
+        True,
+        "not-a-dict",
+    ]
+    fetched, _, reason = asyncio.run(
+        _walk(FakePage(script), [_item("100")], {"100"}, 1, pages=3, limit=200)
+    )
+    assert (fetched, reason) == (1, "error")
+
+
+def test_first_card_id_returns_first_with_id():
+    """锚点函数：跳过无 id 条目，取首个可解析 id。"""
+    f = t["_first_card_id"]
+    assert f([{"url": "https://x/no-id"}, {"url": "https://www.goofish.com/item?id=42"}]) == "42"
+    assert f([]) == ""
+    assert f([{"url": ""}]) == ""

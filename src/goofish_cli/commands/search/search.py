@@ -36,11 +36,6 @@ AUTH_WALL_ATTEMPTS = 2
 PAGE_STABLE_MS = 2000
 
 
-def _should_retry(payload: dict[str, Any]) -> bool:
-    """零卡片且明确 requiresAuth 时才重试（瞬时登录墙兜底）。"""
-    return not payload.get("items") and bool(payload.get("requiresAuth"))
-
-
 def _normalize_limit(value: Any) -> int:
     try:
         n = int(value)
@@ -199,6 +194,78 @@ def _raise_for_failed_page(payload: dict[str, Any]) -> None:
         )
 
 
+async def _walk_pages(
+    page: Any,
+    items: list[dict[str, Any]],
+    seen: set[str],
+    fetched_pages: int,
+    pages: int,
+    limit: int,
+) -> tuple[int, int | None, str]:
+    """翻页状态机：点右箭头 → 等重渲染 → 去重累积。
+
+    返回 (fetched_pages, total_pages, stopped_reason)。任何翻页途中的
+    Playwright 异常（SPA 重渲染销毁执行上下文等）都被吞掉并优雅终止——
+    调用方拿到已累积的部分结果，stopped_reason 说明终止原因。
+
+    锚点（cur_first_id）始终取**未过滤**的下一页 payload 首卡：
+    fresh 是去重后的列表，若下一页首卡与上一页重复，它会被过滤掉，
+    用 fresh 的首卡做锚点会与 DOM 实况脱节，导致 page-change 等待
+    假阳性、提前终止（review P1-2）。
+    """
+    anchor_id = _first_card_id(items) or ""
+    total_pages: int | None = None
+    stopped_reason = "pages_reached"
+
+    while fetched_pages < pages and len(items) < limit:
+        try:
+            pag = await page.evaluate(_PAGINATION_JS)
+        except Exception:  # noqa: BLE001 — 执行上下文销毁等，保留已抓结果
+            return fetched_pages, total_pages, "error"
+
+        if total_pages is None and pag.get("totalPages") is not None:
+            total_pages = pag["totalPages"]
+        if not pag.get("hasNext"):
+            return fetched_pages, total_pages, "last_page"
+
+        try:
+            arrow = page.locator('[class*="pagination-arrow-container"]').nth(1)
+            await arrow.click(timeout=5000)
+            # 等待"首卡 id 不再等于上一页 DOM 首卡"。changed=False 是等待超时
+            # （重渲染大概率失败）；先看提取结果再定性。
+            changed = await page.evaluate(_WAIT_PAGE_CHANGE_JS, anchor_id)
+            await page.wait_for_timeout(PAGE_STABLE_MS)
+            nxt = await page.evaluate(_EXTRACT_JS, MAX_LIMIT)
+        except Exception:  # noqa: BLE001 — 同上，部分结果优先
+            return fetched_pages, total_pages, "error"
+        if not isinstance(nxt, dict):
+            return fetched_pages, total_pages, "error"
+
+        # 锚点更新为**未过滤** payload 的首卡（= 本页 DOM 实际首卡）。
+        # fresh 是去重后的列表：若本页首卡与上一页重复，会被过滤掉，
+        # 用 fresh 的首卡会让下一轮等待基准与 DOM �脱节（review P1-2）。
+        nxt_items = nxt.get("items") or []
+        anchor_id = _first_card_id(nxt_items) or anchor_id
+        fresh = [
+            it for it in nxt_items if _item_id_from_url(it.get("url", "")) not in seen
+        ]
+        if not fresh:
+            if not nxt_items and nxt.get("blocked"):
+                return fetched_pages, total_pages, "blocked"
+            return fetched_pages, total_pages, "no_new" if changed else "stale"
+
+        for it in fresh:
+            item_id = _item_id_from_url(it.get("url", ""))
+            if item_id:
+                seen.add(item_id)
+            items.append(it)
+        fetched_pages += 1
+
+    if len(items) >= limit:
+        return fetched_pages, total_pages, "limit"
+    return fetched_pages, total_pages, stopped_reason
+
+
 async def _run(query: str, limit: int, pages: int) -> dict[str, Any]:
     url = _build_search_url(query)
 
@@ -235,46 +302,19 @@ async def _run(query: str, limit: int, pages: int) -> dict[str, Any]:
                 seen.add(item_id)
             items.append(it)
         fetched_pages = 1
-        cur_first_id = _first_card_id(payload.get("items") or [])
 
-        # ---- 翻页：点右箭头 → 等重渲染 → 去重累积 ----
-        while fetched_pages < pages and len(items) < limit:
-            pag = await page.evaluate(_PAGINATION_JS)
-            if total_pages is None and pag.get("totalPages") is not None:
-                total_pages = pag["totalPages"]
-            if not pag.get("hasNext"):
-                break
-
-            arrow = page.locator('[class*="pagination-arrow-container"]').nth(1)
-            try:
-                await arrow.click(timeout=5000)
-            except Exception:  # noqa: BLE001 — 箭头消失/被遮挡按最后一页处理
-                break
-            await page.evaluate(_WAIT_PAGE_CHANGE_JS, cur_first_id)
-            await page.wait_for_timeout(PAGE_STABLE_MS)
-
-            nxt = await page.evaluate(_EXTRACT_JS, MAX_LIMIT)
-            if not isinstance(nxt, dict):
-                break
-            fresh = [
-                it
-                for it in (nxt.get("items") or [])
-                if _item_id_from_url(it.get("url", "")) not in seen
-            ]
-            if not fresh:
-                break  # 重渲染失败 / 重复页：防御性终止，返回已有结果
-            cur_first_id = _first_card_id(fresh)
-            for it in fresh:
-                item_id = _item_id_from_url(it.get("url", ""))
-                if item_id:
-                    seen.add(item_id)
-                items.append(it)
-            fetched_pages += 1
+        # ---- 翻页：点右箭头 → 等重渲染 → 去重累积（状态机，见 _walk_pages）----
+        fetched_pages, total_pages, stopped_reason = await _walk_pages(
+            page, items, seen, fetched_pages, pages, limit
+        )
 
         # 循环提前退出（到 limit / 末页）时补一次终态读取
         if total_pages is None:
-            pag = await page.evaluate(_PAGINATION_JS)
-            total_pages = pag.get("totalPages")
+            try:
+                pag = await page.evaluate(_PAGINATION_JS)
+                total_pages = pag.get("totalPages")
+            except Exception:  # noqa: BLE001 — 终态读取失败不影响部分结果
+                total_pages = None
 
     items = items[:limit]
     return {
@@ -285,6 +325,7 @@ async def _run(query: str, limit: int, pages: int) -> dict[str, Any]:
         "total": len(items),
         "pages_fetched": fetched_pages,
         "pages_total": total_pages,
+        "stopped_reason": stopped_reason,
         "query": "",
     }
 
@@ -311,5 +352,6 @@ __test__ = {
     "_normalize_pages": _normalize_pages,
     "_build_search_url": _build_search_url,
     "_item_id_from_url": _item_id_from_url,
-    "_should_retry": _should_retry,
+    "_first_card_id": _first_card_id,
+    "_walk_pages": _walk_pages,
 }
