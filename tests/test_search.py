@@ -1,9 +1,12 @@
 """纯函数测 search 的参数归一化和 URL 构造。真浏览器路径走 e2e 验证，不进单测。"""
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
 from goofish_cli.commands.search.search import __test__ as t
+from goofish_cli.commands.search.search import search
 
 
 def test_normalize_limit_clamps_and_defaults():
@@ -55,3 +58,38 @@ def test_should_retry():
     assert should_retry({"items": [], "requiresAuth": True}) is True
     assert should_retry({"items": [], "requiresAuth": True, "empty": True}) is True
     assert should_retry({"items": [], "requiresAuth": True, "blocked": True}) is True
+
+
+def test_search_returns_ranked_items_on_success():
+    """回归：_run() 成功时应返回带 rank/item_id 的 list，不能是 None。
+
+    patch `_search_once`（而非 `asyncio.run`），让 `_run` 真正执行，
+    验证 rank/item_id 组装逻辑。
+    """
+    from unittest.mock import patch
+
+    fake_raw = {
+        "items": [
+            {"title": "商品A", "url": "https://www.goofish.com/item?id=100", "price": "¥10"},
+            {"title": "商品B", "url": "https://www.goofish.com/item?id=200", "price": "¥20"},
+        ],
+        "requiresAuth": False,
+        "blocked": False,
+        "empty": False,
+        "bodyPreview": "",
+    }
+    with patch("goofish_cli.commands.search.search._search_once", new=AsyncMock(return_value=fake_raw)):
+        result = search("test")
+    assert result is not None
+    assert result["total"] == 2
+    assert result["items"][0]["rank"] == 1
+    assert result["items"][0]["item_id"] == "100"
+    assert result["items"][1]["rank"] == 2
+    assert result["items"][1]["item_id"] == "200"
+
+
+def test_search_returns_none_when_run_returns_none():
+    """_run 返回 None 时 search() 原样透传——这是真 bug，应当让上层注意到。"""
+    with patch("asyncio.run", return_value=None):
+        result = search("test")
+    assert result is None

@@ -131,7 +131,7 @@ async def _search_once(query: str, limit: int) -> dict[str, Any]:
         return await page.evaluate(_EXTRACT_JS, limit)
 
 
-async def _run(query: str, limit: int) -> list[dict[str, Any]]:
+async def _run(query: str, limit: int) -> dict[str, Any]:
     payload: dict[str, Any] | None = None
     for attempt in range(1, AUTH_WALL_ATTEMPTS + 1):
         raw = await _search_once(query, limit)
@@ -158,6 +158,15 @@ async def _run(query: str, limit: int) -> list[dict[str, Any]]:
             f"页面文案预览：{preview!r}"
         )
 
+    items = items[:limit]
+    return {
+        "items": [
+            {"rank": i + 1, "item_id": _item_id_from_url(it.get("url", "")), **it}
+            for i, it in enumerate(items)
+        ],
+        "total": len(items),
+        "query": query,
+    }
 
 
 @command(
@@ -168,8 +177,7 @@ async def _run(query: str, limit: int) -> list[dict[str, Any]]:
     columns=["rank", "item_id", "title", "price", "condition", "brand", "location", "badge", "url"],
 )
 def search(query: str, limit: int = 20) -> dict[str, Any]:
-    items = asyncio.run(_run(str(query).strip(), _normalize_limit(limit)))
-    return {"items": items, "total": len(items), "query": query}
+    return asyncio.run(_run(str(query).strip(), _normalize_limit(limit)))
 
 
 __test__ = {

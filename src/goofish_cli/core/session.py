@@ -19,6 +19,7 @@ from pathlib import Path
 import requests
 from loguru import logger
 
+from goofish_cli.core.cookie_types import CookieRecord
 from goofish_cli.core.crypto import decrypt_cookies, encrypt_cookies
 from goofish_cli.core.errors import AuthRequiredError
 from goofish_cli.core.sign import generate_device_id
@@ -42,16 +43,29 @@ USER_AGENT = (
 )
 
 
-def _records_to_flat(records: list[dict[str, str]]) -> dict[str, str]:
+def _records_to_flat(records: list[CookieRecord]) -> dict[str, str]:
     """提取 records 中 {name, value} 为 flat dict，供 requests jar 使用。"""
     return {r["name"]: r["value"] for r in records if r.get("value")}
 
 
-def _coerce_records(cookies) -> list[dict[str, str]]:
-    """dict | list → list[Record]。dict 时填充 domain=''（legacy 格式）。"""
+def _coerce_records(cookies: dict[str, str] | list[CookieRecord]) -> list[CookieRecord]:
+    """dict | list → list[CookieRecord]。dict 时填充 domain='' path=''（legacy）。"""
     if isinstance(cookies, list):
-        return [r if r.get("domain") is not None else {**r, "domain": ""} for r in cookies]
-    return [{"name": k, "value": v, "domain": ""} for k, v in cookies.items() if v]
+        return [
+            {
+                "name": r["name"],
+                "value": r["value"],
+                "domain": r.get("domain", ""),
+                "path": r.get("path", ""),
+            }
+            for r in cookies
+            if r.get("value")
+        ]
+    return [
+        {"name": k, "value": v, "domain": "", "path": ""}
+        for k, v in cookies.items()
+        if v
+    ]
 
 
 @dataclass
@@ -60,7 +74,7 @@ class Session:
     unb: str
     tracknick: str
     device_id: str
-    cookie_records: list[dict[str, str]] = field(default_factory=list)
+    cookie_records: list[CookieRecord] = field(default_factory=list)
 
     @classmethod
     def load(cls, cookie_path: Path | str | None = None) -> Session:
@@ -90,7 +104,7 @@ class Session:
         return raw.split("_")[0] if raw else ""
 
 
-def _load_or_bootstrap_cookies(path: Path) -> list[dict[str, str]]:
+def _load_or_bootstrap_cookies(path: Path) -> list[CookieRecord]:
     """先查本地 cookies.json；没有就从本机浏览器自动导入一次写盘。"""
     if path.exists():
         cookies = _load_cookies(path)
@@ -134,7 +148,7 @@ def _load_or_bootstrap_cookies(path: Path) -> list[dict[str, str]]:
     return records
 
 
-def _bootstrap_from_browser() -> tuple[str, list[dict[str, str]]]:
+def _bootstrap_from_browser() -> tuple[str, list[CookieRecord]]:
     """单独封装一层，方便测试时 monkeypatch。"""
     from goofish_cli.core.browser_cookie import extract_goofish_cookies
     return extract_goofish_cookies(browser="auto")
@@ -169,7 +183,7 @@ def _load_or_mint_device_id(unb: str) -> str:
     return device_id
 
 
-def _load_cookies(path: Path) -> list[dict[str, str]]:
+def _load_cookies(path: Path) -> list[CookieRecord]:
     raw_bytes = path.read_bytes()
     # 优先尝试解密（加密格式或明文 JSON）
     data: dict | list | None = None
@@ -183,7 +197,7 @@ def _load_cookies(path: Path) -> list[dict[str, str]]:
     return _coerce_records(data)
 
 
-def _maybe_migrate_to_encrypted(path: Path, cookies: list[dict[str, str]]) -> None:
+def _maybe_migrate_to_encrypted(path: Path, cookies: list[CookieRecord]) -> None:
     """如果文件是明文 JSON，自动加密覆盖。"""
     try:
         raw = path.read_bytes()

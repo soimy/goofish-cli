@@ -30,6 +30,7 @@ from typing import Any
 
 from loguru import logger
 
+from goofish_cli.core.cookie_types import CookieRecord
 from goofish_cli.core.session import Session
 
 PROFILES_PARENT = Path.home() / ".goofish-cli" / "profiles"
@@ -49,7 +50,7 @@ def _cookies_to_playwright(cookies) -> list[dict[str, Any]]:
     """把 flat dict 或 records list 转成 playwright add_cookies 需要的列表。
 
     有 domain 的 records 单域注入（无广播）。domain='' 的 legacy 记录
-    走 _legacy_domain 窄映射分发到单域。
+    走 _legacy_domain 窄映射分发到单域。记录中的 path 会被注入（不再硬编码 '/'）。
     """
     from .session import _coerce_records
     records = _coerce_records(cookies)
@@ -64,7 +65,7 @@ def _cookies_to_playwright(cookies) -> list[dict[str, Any]]:
             "name": r["name"],
             "value": r["value"],
             "domain": domain,
-            "path": "/",
+            "path": r.get("path") or "/",   # ← 用记录的 path
             "expires": expires,
             "httpOnly": False,
             "secure": True,
@@ -73,7 +74,7 @@ def _cookies_to_playwright(cookies) -> list[dict[str, Any]]:
     return out
 
 
-def _load_cookies_from_session() -> list[dict[str, str]]:
+def _load_cookies_from_session() -> list[CookieRecord]:
     """返回 session.cookie_records（已带 domain），fallback 展平 jar（生成 domain='' records）。"""
     session = Session.load()
     if session.cookie_records:

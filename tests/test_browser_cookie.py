@@ -163,6 +163,6 @@ def test_jars_to_dict_filters_non_alibaba():
     )
     out = bc._jars_to_dict([jar])
     assert out == [
-        {"name": "unb", "value": "U", "domain": ".taobao.com"},
-        {"name": "foo", "value": "bar", "domain": ".tmall.com"},
+        {"name": "unb", "value": "U", "domain": ".taobao.com", "path": "/"},
+        {"name": "foo", "value": "bar", "domain": ".tmall.com", "path": "/"},
     ]

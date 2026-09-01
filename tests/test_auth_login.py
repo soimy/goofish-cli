@@ -36,7 +36,11 @@ def test_raw_without_source_raises(fake_target, monkeypatch):
 
 def test_no_args_goes_to_browser_auto(fake_target, monkeypatch):
     """goofish auth login 无参数 → 走浏览器 auto-detect。"""
-    fake = {"unb": "U", "_m_h5_tk": "T_xxx_1", "tracknick": "n"}
+    fake = [
+        {"name": "unb", "value": "U", "domain": "", "path": ""},
+        {"name": "_m_h5_tk", "value": "T_xxx_1", "domain": "", "path": ""},
+        {"name": "tracknick", "value": "n", "domain": "", "path": ""},
+    ]
     monkeypatch.setattr(login_mod, "_pull_from_browser", lambda b: (fake, f"browser:{b}"))
 
     out = login_mod.login()

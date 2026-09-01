@@ -23,6 +23,8 @@ from typing import Any
 
 from loguru import logger
 
+from .cookie_types import CookieRecord
+
 # 闲鱼/淘系登录态涉及的域。browser_cookie3 的 domain_name 是子串匹配，
 # 传 goofish.com 能覆盖 .goofish.com / www.goofish.com。为了不漏掉散落在
 # 淘系其它子域的关键 cookie（unb/_m_h5_tk 历史上就跨 .taobao.com），
@@ -126,7 +128,7 @@ for d in domains:
         for c in loader(domain_name=d):
             host = (c.domain or "").lstrip(".")
             if any(h in host for h in hosts):
-                out.append({"name": c.name, "value": c.value, "domain": c.domain or ""})
+                out.append({"name": c.name, "value": c.value, "domain": c.domain or "", "path": c.path or "/"})
     except Exception as e:
         print(json.dumps({"error": f"extract-fail:{e}"})); sys.exit(0)
 print(json.dumps({"cookies": {r["name"]: r["value"] for r in out}, "_v2": out}))
@@ -167,25 +169,26 @@ print(json.dumps({"cookies": {r["name"]: r["value"] for r in out}, "_v2": out}))
     return data.get("cookies") or None
 
 
-def _jars_to_dict(jars: list[Any]) -> list[dict[str, str]]:
-    """从多个 CookieJar 合并筛出阿里系域 cookie，保留 domain 来源。
+def _jars_to_dict(jars: list[Any]) -> list[CookieRecord]:
+    """从多个 CookieJar 合并筛出阿里系域 cookie，保留 domain+path 来源。
 
-    返回 [{"name": ..., "value": ..., "domain": ...}, ...]，按 (name, domain) 去重。
+    返回 list[CookieRecord]，按 (name, domain, path) 去重。
     """
-    seen: set[tuple[str, str]] = set()
-    out: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    out: list[CookieRecord] = []
     for jar in jars:
         for cookie in jar:
             host = (cookie.domain or "").lstrip(".")
             if not any(h in host for h in ALLOWED_HOSTS):
                 continue
-            key = (cookie.name, cookie.domain or "")
+            key = (cookie.name, cookie.domain or "", cookie.path or "/")
             if key not in seen:
                 seen.add(key)
                 out.append({
                     "name": cookie.name,
                     "value": cookie.value,
                     "domain": cookie.domain or "",
+                    "path": cookie.path or "/",
                 })
     return out
 
@@ -220,7 +223,7 @@ def extract_goofish_cookies(
     browser: str = "auto",
     *,
     max_workers: int = 4,
-) -> tuple[str, list[dict[str, str]]]:
+) -> tuple[str, list[CookieRecord]]:
     """抽闲鱼登录态。
 
     返回 (browser_name, cookies)。

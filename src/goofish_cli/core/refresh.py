@@ -28,6 +28,7 @@ from typing import Any
 
 from loguru import logger
 
+from goofish_cli.core.cookie_types import CookieRecord
 from goofish_cli.core.session import Session, resolve_cookie_path, write_cookies_json
 
 HOME_URL = "https://www.goofish.com"
@@ -142,9 +143,14 @@ def refresh_cookies_via_browser(session: Session, *, persist: bool = True) -> bo
 
     if persist:
         path = resolve_cookie_path()
-        # records 合并：fresh 覆盖 old 中 (name, domain) 相同的，old 其余保留
-        fresh_keys = {(r["name"], r["domain"]) for r in fresh_records}
-        merged = [r for r in session.cookie_records if (r["name"], r["domain"]) not in fresh_keys]
+        # records 合并：fresh 覆盖 old 中 (name, domain, path) 相同的，old 其余保留
+        # 合并 key = (name, domain, path)，与 browser_cookie.py 的去重 key 一致
+        fresh_keys = {(r["name"], r["domain"], r.get("path", "/")) for r in fresh_records}
+        merged: list[CookieRecord] = [
+            r
+            for r in session.cookie_records
+            if (r["name"], r["domain"], r.get("path", "/")) not in fresh_keys
+        ]
         merged.extend(fresh_records)
         try:
             write_cookies_json(path, merged)
@@ -152,6 +158,6 @@ def refresh_cookies_via_browser(session: Session, *, persist: bool = True) -> bo
         except OSError as e:
             logger.debug(f"写回 cookies.json 失败（内存里仍生效）：{e}")
 
-    # 更新 session.cookie_records（内存中同步）
-    session.cookie_records = fresh_records
+    # 内存也用 merged（与 disk 一致；persist=False 时也保持逻辑正确）
+    session.cookie_records = merged
     return True

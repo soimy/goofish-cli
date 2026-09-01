@@ -23,8 +23,14 @@ import json
 from pathlib import Path
 
 from goofish_cli.core import Strategy, command
+from goofish_cli.core.cookie_types import CookieRecord
 from goofish_cli.core.errors import AuthRequiredError
-from goofish_cli.core.session import DEFAULT_COOKIE_PATH, write_cookies_json
+from goofish_cli.core.session import (
+    DEFAULT_COOKIE_PATH,
+    _coerce_records,
+    _records_to_flat,
+    write_cookies_json,
+)
 
 
 @command(
@@ -56,16 +62,10 @@ def login(
         # qr_timeout=None 让 core.qr_login 走统一的 env → 默认值 兜底逻辑；
         # 这里若写 int 默认（例如 120）会把 env 覆盖路径挡掉（CLI 总是显式传值）。
         from goofish_cli.core.qr_login import login_via_qr
-        cookies = login_via_qr(timeout=qr_timeout, persist=False)
-        if not cookies:
-            # 空 dict 可能来自两种失败：超时未扫码，或 Playwright 起不来（Chrome
-            # 未装、端口占用等）。文案同时覆盖，让用户知道去翻日志。
-            raise AuthRequiredError(
-                "QR 扫码登录未完成——可能是超时内未扫码 / 手机未确认，"
-                "也可能是 Playwright 浏览器启动失败（Chrome 未装、端口占用等，"
-                "详见前面的 warning 日志）。可重试并延长超时："
-                "goofish auth login --qr --qr-timeout 180"
-            )
+        raw_cookies = login_via_qr(timeout=qr_timeout, persist=False) or {}
+        records = (
+            _coerce_records(raw_cookies) if isinstance(raw_cookies, dict) else raw_cookies
+        )
         source_label = "qr"
     elif source is None:
         if raw:
@@ -75,33 +75,35 @@ def login(
                 "--raw 需要配合 cookie 字符串使用，如："
                 "goofish auth login 'unb=...; _m_h5_tk=...' --raw"
             )
-        cookies, source_label = _pull_from_browser(browser)
+        records, source_label = _pull_from_browser(browser)
     elif raw:
-        cookies = _parse_raw(source)
+        records = _coerce_records(_parse_raw(source))
         source_label = "raw"
     else:
         p = Path(source).expanduser()
-        cookies = _parse_json(p.read_text())
+        records = _parse_json(p.read_text())
         source_label = f"file:{p}"
 
-    if "unb" not in cookies or "_m_h5_tk" not in cookies:
+    # 校验用 flat 视角
+    flat = _records_to_flat(records)
+    if "unb" not in flat or "_m_h5_tk" not in flat:
         raise AuthRequiredError(
             "cookie 缺失关键字段 unb / _m_h5_tk。"
             "请先在浏览器里登录 https://www.goofish.com 再试。"
         )
 
-    write_cookies_json(target, cookies)
+    write_cookies_json(target, records)
 
     return {
         "source": source_label,
         "path": str(target),
-        "unb": cookies.get("unb", ""),
-        "tracknick": cookies.get("tracknick", ""),
-        "cookies_count": len(cookies),
+        "unb": flat.get("unb", ""),
+        "tracknick": flat.get("tracknick", ""),
+        "cookies_count": len(flat),
     }
 
 
-def _pull_from_browser(browser: str) -> tuple[dict[str, str], str]:
+def _pull_from_browser(browser: str) -> tuple[list[CookieRecord], str]:
     from goofish_cli.core.browser_cookie import (
         BrowserCookieError,
         available_browsers,
@@ -133,10 +135,20 @@ def _parse_raw(raw: str) -> dict[str, str]:
     return out
 
 
-def _parse_json(text: str) -> dict[str, str]:
+def _parse_json(text: str) -> list[CookieRecord]:
+    """解析导入文件。list-form JSON → records（保留 path/domain）；dict → coerce。"""
     data = json.loads(text)
     if isinstance(data, list):
-        return {c["name"]: c["value"] for c in data if "name" in c and "value" in c}
+        return [
+            {
+                "name": c["name"],
+                "value": c["value"],
+                "domain": c.get("domain", ""),
+                "path": c.get("path", ""),
+            }
+            for c in data
+            if "name" in c and "value" in c
+        ]
     if isinstance(data, dict):
-        return {str(k): str(v) for k, v in data.items()}
+        return _coerce_records(data)
     raise AuthRequiredError("cookie JSON 格式不识别（需 list 或 dict）")
