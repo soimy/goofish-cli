@@ -62,10 +62,8 @@ def login(
         # qr_timeout=None 让 core.qr_login 走统一的 env → 默认值 兜底逻辑；
         # 这里若写 int 默认（例如 120）会把 env 覆盖路径挡掉（CLI 总是显式传值）。
         from goofish_cli.core.qr_login import login_via_qr
-        raw_cookies = login_via_qr(timeout=qr_timeout, persist=False) or {}
-        records = (
-            _coerce_records(raw_cookies) if isinstance(raw_cookies, dict) else raw_cookies
-        )
+
+        records = login_via_qr(timeout=qr_timeout, persist=False)
         source_label = "qr"
     elif source is None:
         if raw:

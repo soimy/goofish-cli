@@ -7,6 +7,7 @@ import pytest
 
 from goofish_cli.commands.search.search import __test__ as t
 from goofish_cli.commands.search.search import search
+from goofish_cli.core.errors import AuthRequiredError
 
 
 def test_normalize_limit_clamps_and_defaults():
@@ -88,8 +89,16 @@ def test_search_returns_ranked_items_on_success():
     assert result["items"][1]["item_id"] == "200"
 
 
-def test_search_returns_none_when_run_returns_none():
-    """_run 返回 None 时 search() 原样透传——这是真 bug，应当让上层注意到。"""
-    with patch("asyncio.run", return_value=None):
-        result = search("test")
-    assert result is None
+def test_search_raises_auth_required_error():
+    """登录墙错误必须从 _run 正确传播到 search() 上层——CI 上 warning-free。"""
+
+    def _fake_run(coro):
+        # close 掉协程防止 unawaited coroutine warning
+        coro.close()
+        raise AuthRequiredError("www.goofish.com 搜索结果页要求登录")
+
+    with (
+        patch("asyncio.run", side_effect=_fake_run),
+        pytest.raises(AuthRequiredError, match="www.goofish.com"),
+    ):
+        search("test")

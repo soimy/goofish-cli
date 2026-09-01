@@ -16,6 +16,18 @@ def _make_session(cookies: dict[str, str]) -> Session:
     return Session(http=http, unb=cookies.get("unb", ""), tracknick="", device_id="dev")
 
 
+def _make_session_with_records(records: list[dict[str, str]]) -> Session:
+    """造一个带 cookie_records 的 Session（review-3 复现老路径必备）。"""
+    http = requests.Session()
+    return Session(
+        http=http,
+        unb=next((r["value"] for r in records if r["name"] == "unb"), ""),
+        tracknick="",
+        device_id="dev",
+        cookie_records=list(records),
+    )
+
+
 def _rec(name: str, value: str, domain: str = ".goofish.com") -> dict[str, str]:
     return {"name": name, "value": value, "domain": domain}
 
@@ -112,6 +124,48 @@ def test_refresh_swallows_playwright_exception():
         mock_async.run.side_effect = _fake_run_raises(RuntimeError("chrome not installed"))
         ok = refresh.refresh_cookies_via_browser(session, persist=False)
     assert ok is False
+
+
+def test_refresh_persist_false_success_assigns_merged_to_memory(tmp_path, monkeypatch):
+    """review-3 P1-A：persist=False 成功时必须把 merged 写回 session.cookie_records，
+    不能 UnboundLocalError，也不能丢无关老记录。
+    """
+    custom = tmp_path / "no_write.json"
+    monkeypatch.setenv("GOOFISH_COOKIES_PATH", str(custom))
+
+    # 内存里老 records：unb + 一个无关 cookie `keep_old`
+    old_records = [
+        _rec("unb", "u1"),
+        _rec("_m_h5_tk", "old_1"),
+        _rec("cookie2", "old_c"),
+        _rec("keep_old", "kept"),  # 不在 fresh 里，合并后应保留
+    ]
+    session = _make_session_with_records(old_records)
+    # http.cookies 也得有 old 让 refresh 的 jar 走通
+    session.http.cookies.update(
+        {"unb": "u1", "_m_h5_tk": "old_1", "cookie2": "old_c", "keep_old": "kept"}
+    )
+
+    # fresh 模拟 Playwright 拿到的全新快照：三个必需 + 新增 x5sec
+    fresh = [
+        _rec("unb", "u1"),
+        _rec("_m_h5_tk", "new_2", ".taobao.com"),
+        _rec("cookie2", "new_c", ".taobao.com"),
+        _rec("x5sec", "x", ".goofish.com"),
+    ]
+    with patch.object(refresh, "asyncio") as mock_async:
+        mock_async.run.side_effect = _fake_run(fresh)
+        ok = refresh.refresh_cookies_via_browser(session, persist=False)
+
+    # 成功 + 内存一致 + 无关老记录被保留
+    assert ok is True
+    # 内存 records 应是 merged：old 留下的 (unb / keep_old) + fresh
+    names = [r["name"] for r in session.cookie_records]
+    assert "keep_old" in names, "无关老记录 keep_old 必须被保留在内存里"
+    assert "_m_h5_tk" in names
+    assert "x5sec" in names
+    # 不能写盘（persist=False）
+    assert not custom.exists()
 
 
 @pytest.mark.parametrize(

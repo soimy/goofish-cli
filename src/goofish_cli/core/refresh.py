@@ -141,17 +141,20 @@ def refresh_cookies_via_browser(session: Session, *, persist: bool = True) -> bo
             session.http.cookies.clear(domain=cookie.domain, path=cookie.path, name=cookie.name)
     session.http.cookies.update(flat)
 
+    # records 合并：fresh 覆盖 old 中 (name, domain, path) 相同的，old 其余保留
+    # 合并 key = (name, domain, path)，与 browser_cookie.py 的去重 key 一致。
+    # **必须在 persist 分支外构造**：persist=False 成功路径也要把 merged 写回内存，
+    # 否则 UnboundLocalError（review-3 P1-A）。
+    fresh_keys = {(r["name"], r["domain"], r.get("path", "/")) for r in fresh_records}
+    merged: list[CookieRecord] = [
+        r
+        for r in session.cookie_records
+        if (r["name"], r["domain"], r.get("path", "/")) not in fresh_keys
+    ]
+    merged.extend(fresh_records)
+
     if persist:
         path = resolve_cookie_path()
-        # records 合并：fresh 覆盖 old 中 (name, domain, path) 相同的，old 其余保留
-        # 合并 key = (name, domain, path)，与 browser_cookie.py 的去重 key 一致
-        fresh_keys = {(r["name"], r["domain"], r.get("path", "/")) for r in fresh_records}
-        merged: list[CookieRecord] = [
-            r
-            for r in session.cookie_records
-            if (r["name"], r["domain"], r.get("path", "/")) not in fresh_keys
-        ]
-        merged.extend(fresh_records)
         try:
             write_cookies_json(path, merged)
             logger.info(f"cookie 已刷新并写回 {path}")
