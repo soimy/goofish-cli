@@ -25,7 +25,12 @@ def _fake_run_raises(exc):
 
 def test_login_via_qr_success_writes_disk(tmp_path, monkeypatch):
     monkeypatch.setenv("GOOFISH_COOKIES_PATH", str(tmp_path / "cookies.json"))
-    fake = {"_m_h5_tk": "t", "unb": "u", "cookie2": "c", "sgcookie": "s"}
+    fake = [
+        {"name": "_m_h5_tk", "value": "t", "domain": ".goofish.com", "path": "/"},
+        {"name": "unb", "value": "u", "domain": ".goofish.com", "path": "/"},
+        {"name": "cookie2", "value": "c", "domain": ".taobao.com", "path": "/"},
+        {"name": "sgcookie", "value": "s", "domain": ".taobao.com", "path": "/"},
+    ]
     with patch.object(qr_login, "asyncio") as mock_async:
         mock_async.run.side_effect = _fake_run(fake)
         out = qr_login.login_via_qr(timeout=10, persist=True)
@@ -36,7 +41,11 @@ def test_login_via_qr_success_writes_disk(tmp_path, monkeypatch):
 
 def test_login_via_qr_success_no_persist(tmp_path, monkeypatch):
     monkeypatch.setenv("GOOFISH_COOKIES_PATH", str(tmp_path / "cookies.json"))
-    fake = {"_m_h5_tk": "t", "unb": "u", "cookie2": "c"}
+    fake = [
+        {"name": "_m_h5_tk", "value": "t", "domain": ".goofish.com", "path": "/"},
+        {"name": "unb", "value": "u", "domain": ".goofish.com", "path": "/"},
+        {"name": "cookie2", "value": "c", "domain": ".taobao.com", "path": "/"},
+    ]
     with patch.object(qr_login, "asyncio") as mock_async:
         mock_async.run.side_effect = _fake_run(fake)
         out = qr_login.login_via_qr(timeout=10, persist=False)
@@ -48,10 +57,10 @@ def test_login_via_qr_success_no_persist(tmp_path, monkeypatch):
 def test_login_via_qr_timeout_returns_empty(tmp_path, monkeypatch):
     monkeypatch.setenv("GOOFISH_COOKIES_PATH", str(tmp_path / "cookies.json"))
     with patch.object(qr_login, "asyncio") as mock_async:
-        mock_async.run.side_effect = _fake_run({})  # 模拟超时没拿到 cookies
+        mock_async.run.side_effect = _fake_run([])  # 模拟超时没拿到 cookies
         out = qr_login.login_via_qr(timeout=5, persist=True)
 
-    assert out == {}
+    assert out == []
     # 空结果不应写盘
     assert not (tmp_path / "cookies.json").exists()
 
@@ -60,7 +69,7 @@ def test_login_via_qr_swallows_playwright_exception():
     with patch.object(qr_login, "asyncio") as mock_async:
         mock_async.run.side_effect = _fake_run_raises(RuntimeError("chrome not installed"))
         out = qr_login.login_via_qr(timeout=5, persist=False)
-    assert out == {}
+    assert out == []
 
 
 def test_login_via_qr_respects_env_timeout(monkeypatch):
@@ -70,13 +79,13 @@ def test_login_via_qr_respects_env_timeout(monkeypatch):
 
     async def _record(t):
         captured.append(t)
-        return {}
+        return []
 
     monkeypatch.setattr(qr_login, "_login_via_qr_async", _record)
     out = qr_login.login_via_qr(persist=False)
 
     assert captured == [30]
-    assert out == {}
+    assert out == []
 
 
 def test_login_via_qr_env_invalid_falls_back(monkeypatch):
@@ -86,14 +95,14 @@ def test_login_via_qr_env_invalid_falls_back(monkeypatch):
 
     async def _record(t):
         captured.append(t)
-        return {}
+        return []
 
     monkeypatch.setattr(qr_login, "_login_via_qr_async", _record)
     # 不应抛 ValueError
     out = qr_login.login_via_qr(persist=False)
 
     assert captured == [qr_login._DEFAULT_QR_TIMEOUT]
-    assert out == {}
+    assert out == []
 
 
 def test_login_via_qr_explicit_timeout_wins_over_env(monkeypatch):
@@ -103,7 +112,7 @@ def test_login_via_qr_explicit_timeout_wins_over_env(monkeypatch):
 
     async def _record(t):
         captured.append(t)
-        return {}
+        return []
 
     monkeypatch.setattr(qr_login, "_login_via_qr_async", _record)
     qr_login.login_via_qr(timeout=42, persist=False)

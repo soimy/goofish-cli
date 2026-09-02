@@ -1,9 +1,13 @@
 """纯函数测 search 的参数归一化和 URL 构造。真浏览器路径走 e2e 验证，不进单测。"""
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
 from goofish_cli.commands.search.search import __test__ as t
+from goofish_cli.commands.search.search import search
+from goofish_cli.core.errors import AuthRequiredError
 
 
 def test_normalize_limit_clamps_and_defaults():
@@ -34,3 +38,67 @@ def test_build_search_url_encodes_query():
 )
 def test_item_id_from_url(url, expected):
     assert t["_item_id_from_url"](url) == expected
+
+
+def test_auth_wall_attempts_is_two():
+    """瞬时登录墙重试：总尝试 2 次（首次 + 1 次退避重试）。"""
+    assert t["AUTH_WALL_ATTEMPTS"] == 2
+
+
+def test_should_retry():
+    """零卡片且 requiresAuth 为真才重试（瞬时登录墙兜底）。
+
+    注意 `_EXTRACT_JS` 恒返回 `items` 键：真实登录墙载荷是
+    `{"items": [], "requiresAuth": True, ...}`，必须重试。
+    """
+    should_retry = t["_should_retry"]
+    assert should_retry({"items": [{"id": 1}]}) is False
+    assert should_retry({}) is False
+    assert should_retry({"requiresAuth": True}) is True
+    assert should_retry({"requiresAuth": False}) is False
+    assert should_retry({"items": [], "requiresAuth": True}) is True
+    assert should_retry({"items": [], "requiresAuth": True, "empty": True}) is True
+    assert should_retry({"items": [], "requiresAuth": True, "blocked": True}) is True
+
+
+def test_search_returns_ranked_items_on_success():
+    """回归：_run() 成功时应返回带 rank/item_id 的 list，不能是 None。
+
+    patch `_search_once`（而非 `asyncio.run`），让 `_run` 真正执行，
+    验证 rank/item_id 组装逻辑。
+    """
+    from unittest.mock import patch
+
+    fake_raw = {
+        "items": [
+            {"title": "商品A", "url": "https://www.goofish.com/item?id=100", "price": "¥10"},
+            {"title": "商品B", "url": "https://www.goofish.com/item?id=200", "price": "¥20"},
+        ],
+        "requiresAuth": False,
+        "blocked": False,
+        "empty": False,
+        "bodyPreview": "",
+    }
+    with patch("goofish_cli.commands.search.search._search_once", new=AsyncMock(return_value=fake_raw)):
+        result = search("test")
+    assert result is not None
+    assert result["total"] == 2
+    assert result["items"][0]["rank"] == 1
+    assert result["items"][0]["item_id"] == "100"
+    assert result["items"][1]["rank"] == 2
+    assert result["items"][1]["item_id"] == "200"
+
+
+def test_search_raises_auth_required_error():
+    """登录墙错误必须从 _run 正确传播到 search() 上层——CI 上 warning-free。"""
+
+    def _fake_run(coro):
+        # close 掉协程防止 unawaited coroutine warning
+        coro.close()
+        raise AuthRequiredError("www.goofish.com 搜索结果页要求登录")
+
+    with (
+        patch("asyncio.run", side_effect=_fake_run),
+        pytest.raises(AuthRequiredError, match="www.goofish.com"),
+    ):
+        search("test")

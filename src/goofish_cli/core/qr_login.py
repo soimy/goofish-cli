@@ -29,6 +29,7 @@ from typing import Any
 
 from loguru import logger
 
+from goofish_cli.core.cookie_types import CookieRecord
 from goofish_cli.core.session import resolve_cookie_path, write_cookies_json
 
 HOME_URL = "https://www.goofish.com/login"
@@ -79,7 +80,7 @@ def _has_all_login_cookies(cookies_list: list[dict[str, Any]]) -> bool:
     return all(k in names for k in _REQUIRED_LOGIN_COOKIES)
 
 
-async def _login_via_qr_async(timeout: int) -> dict[str, str]:
+async def _login_via_qr_async(timeout: int) -> list[CookieRecord]:
     # 延迟 import——单测环境没装 playwright 也能 import 本模块
     from goofish_cli.core.browser import goofish_page
 
@@ -90,7 +91,7 @@ async def _login_via_qr_async(timeout: int) -> dict[str, str]:
         await page.wait_for_timeout(1500)
 
         if not await _wait_for_qr(page):
-            return {}
+            return []
 
         logger.info(f"[qr] 请用手机闲鱼 App 扫码登录（{timeout}s 超时）")
 
@@ -100,15 +101,21 @@ async def _login_via_qr_async(timeout: int) -> dict[str, str]:
             cookies_list = await page.context.cookies()
             if _has_all_login_cookies(cookies_list):
                 logger.info("[qr] 扫码成功，session cookies 已下发")
-                return {
-                    c["name"]: c["value"]
+                # 返回 CookieRecord 列表，保留完整的 domain / path（review-3 P1-B）
+                return [
+                    {
+                        "name": c["name"],
+                        "value": c["value"],
+                        "domain": c.get("domain", ""),
+                        "path": c.get("path", "/"),
+                    }
                     for c in cookies_list
                     if c.get("name") and c.get("value")
-                }
+                ]
             await asyncio.sleep(1.0)
 
         logger.warning(f"[qr] {timeout}s 超时未登录成功")
-        return {}
+        return []
 
 
 def _resolve_timeout(timeout: int | None) -> int:
@@ -127,27 +134,27 @@ def _resolve_timeout(timeout: int | None) -> int:
         return _DEFAULT_QR_TIMEOUT
 
 
-def login_via_qr(*, timeout: int | None = None, persist: bool = True) -> dict[str, str]:
-    """阻塞：起 Playwright 让用户扫码，成功返回 cookies 并可选写回磁盘。
+def login_via_qr(*, timeout: int | None = None, persist: bool = True) -> list[CookieRecord]:
+    """阻塞：起 Playwright 让用户扫码，成功返回 CookieRecord 列表（保留 domain/path）并可选写回磁盘。
 
-    空 dict 表示超时或 Playwright 异常（Chrome 未装等）。
+    空列表表示超时或 Playwright 异常（Chrome 未装等）。
     """
     timeout = _resolve_timeout(timeout)
     try:
-        cookies = asyncio.run(_login_via_qr_async(timeout))
+        records = asyncio.run(_login_via_qr_async(timeout))
     except Exception as e:  # noqa: BLE001 — Playwright 起不来、Chrome 未装等都走这里
         logger.warning(f"QR 扫码登录失败：{e}")
-        return {}
+        return []
 
-    if not cookies:
-        return {}
+    if not records:
+        return []
 
     if persist:
         path = resolve_cookie_path()
         try:
-            write_cookies_json(path, cookies)
+            write_cookies_json(path, records)
             logger.info(f"cookie 已写回 {path}")
         except OSError as e:
             logger.warning(f"写回 cookies.json 失败（内存里仍生效）：{e}")
 
-    return cookies
+    return records

@@ -19,6 +19,14 @@ from goofish_cli.core.browser import auto_scroll, goofish_page
 from goofish_cli.core.errors import AuthRequiredError, GoofishError
 
 MAX_LIMIT = 50
+# 0 卡片 + requiresAuth 时判定为疑似瞬时登录墙（同一 cookie 注入实测时好时坏），
+# 总尝试次数（含首次）。重试前短暂退避，避免连续两枪都打在风控瞬间。
+AUTH_WALL_ATTEMPTS = 2
+
+
+def _should_retry(payload: dict[str, Any]) -> bool:
+    """零卡片且明确 requiresAuth 时才重试（瞬时登录墙兜底）。"""
+    return not payload.get("items") and bool(payload.get("requiresAuth"))
 
 
 def _normalize_limit(value: Any) -> int:
@@ -114,17 +122,28 @@ _EXTRACT_JS = r"""
 """
 
 
-async def _run(query: str, limit: int) -> list[dict[str, Any]]:
+async def _search_once(query: str, limit: int) -> dict[str, Any]:
     url = _build_search_url(query)
     async with goofish_page() as page:
         await page.goto(url, wait_until="domcontentloaded")
         await page.wait_for_timeout(2000)
         await auto_scroll(page, times=2)
-        payload = await page.evaluate(_EXTRACT_JS, limit)
+        return await page.evaluate(_EXTRACT_JS, limit)
 
-    if not isinstance(payload, dict):
-        raise GoofishError("搜索页返回结构非预期")
 
+async def _run(query: str, limit: int) -> dict[str, Any]:
+    payload: dict[str, Any] | None = None
+    for attempt in range(1, AUTH_WALL_ATTEMPTS + 1):
+        raw = await _search_once(query, limit)
+        if not isinstance(raw, dict):
+            raise GoofishError("搜索页返回结构非预期")
+        payload = raw
+        if not _should_retry(raw):
+            break
+        if attempt < AUTH_WALL_ATTEMPTS:
+            await asyncio.sleep(1.5)
+
+    assert payload is not None
     items = payload.get("items") or []
     # "登录后" 在页脚也会出现——只有在"没拿到卡片 && 命中关键词"时才判定 auth 失败
     if not items and payload.get("requiresAuth"):
@@ -139,14 +158,15 @@ async def _run(query: str, limit: int) -> list[dict[str, Any]]:
             f"页面文案预览：{preview!r}"
         )
 
-    return [
-        {
-            "rank": i + 1,
-            "item_id": _item_id_from_url(it.get("url", "")),
-            **it,
-        }
-        for i, it in enumerate(items)
-    ]
+    items = items[:limit]
+    return {
+        "items": [
+            {"rank": i + 1, "item_id": _item_id_from_url(it.get("url", "")), **it}
+            for i, it in enumerate(items)
+        ],
+        "total": len(items),
+        "query": query,
+    }
 
 
 @command(
@@ -157,13 +177,14 @@ async def _run(query: str, limit: int) -> list[dict[str, Any]]:
     columns=["rank", "item_id", "title", "price", "condition", "brand", "location", "badge", "url"],
 )
 def search(query: str, limit: int = 20) -> dict[str, Any]:
-    items = asyncio.run(_run(str(query).strip(), _normalize_limit(limit)))
-    return {"items": items, "total": len(items), "query": query}
+    return asyncio.run(_run(str(query).strip(), _normalize_limit(limit)))
 
 
 __test__ = {
     "MAX_LIMIT": MAX_LIMIT,
+    "AUTH_WALL_ATTEMPTS": AUTH_WALL_ATTEMPTS,
     "_normalize_limit": _normalize_limit,
     "_build_search_url": _build_search_url,
     "_item_id_from_url": _item_id_from_url,
+    "_should_retry": _should_retry,
 }

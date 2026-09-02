@@ -30,40 +30,42 @@ from typing import Any
 
 from loguru import logger
 
+from goofish_cli.core.cookie_types import CookieRecord
 from goofish_cli.core.session import Session
 
 PROFILES_PARENT = Path.home() / ".goofish-cli" / "profiles"
 
-# 需要种的域。goofish.com 下的 cookie 只在 .goofish.com 生效，
-# 但淘系签名链路依赖的 _m_h5_tk / x5sec / sgcookie 历史上会跨 .taobao.com。
-# playwright 的 add_cookies 要求显式 domain，所以我们按 cookie 名分发。
+# 淘系签名链路 cookie（历史上跨 .taobao.com），其余默认落 .goofish.com。
+# 仅用于 legacy flat dict 格式（无 domain 信息时）的窄映射兜底。
+# 有 domain 的 records 直接用其 domain，不再广播。
 _TAOBAO_COOKIE_NAMES = {"_m_h5_tk", "_m_h5_tk_enc", "x5sec", "sgcookie", "cookie2", "_tb_token_"}
 
 
-def _split_cookie_domain(name: str) -> str:
-    """按 cookie 名字反推它归属哪个域。
-
-    名字明显是淘系签名链（_m_h5_tk / x5sec / cookie2 / sgcookie）的 → `.taobao.com`，
-    其余一律当 goofish 下：`.goofish.com`。实际浏览器里这些 cookie 是从
-    `api.m.taobao.com` 和 `www.goofish.com` 分头写入的，所以灌的时候也要分头。
-    """
+def _legacy_domain(name: str) -> str:
+    """按 cookie 名字反推归属域。仅用于 domain='' 的 legacy 记录。"""
     return ".taobao.com" if name in _TAOBAO_COOKIE_NAMES else ".goofish.com"
 
 
-def _cookies_to_playwright(cookies: dict[str, str]) -> list[dict[str, Any]]:
-    """把 `{name: value}` 转成 playwright `add_cookies` 需要的列表形态。"""
+def _cookies_to_playwright(cookies) -> list[dict[str, Any]]:
+    """把 flat dict 或 records list 转成 playwright add_cookies 需要的列表。
+
+    有 domain 的 records 单域注入（无广播）。domain='' 的 legacy 记录
+    走 _legacy_domain 窄映射分发到单域。记录中的 path 会被注入（不再硬编码 '/'）。
+    """
+    from .session import _coerce_records
+    records = _coerce_records(cookies)
     now = int(__import__("time").time())
-    # 7 天后过期——cookies.json 自身会被 Session 层更新，这里只要够跑完当前命令就行
     expires = now + 7 * 24 * 3600
     out: list[dict[str, Any]] = []
-    for name, value in cookies.items():
-        if not value:
+    for r in records:
+        if not r.get("value"):
             continue
+        domain = r["domain"] or _legacy_domain(r["name"])
         out.append({
-            "name": name,
-            "value": value,
-            "domain": _split_cookie_domain(name),
-            "path": "/",
+            "name": r["name"],
+            "value": r["value"],
+            "domain": domain,
+            "path": r.get("path") or "/",   # ← 用记录的 path
             "expires": expires,
             "httpOnly": False,
             "secure": True,
@@ -72,12 +74,17 @@ def _cookies_to_playwright(cookies: dict[str, str]) -> list[dict[str, Any]]:
     return out
 
 
-def _load_cookies_from_session() -> dict[str, str]:
-    """直接走 Session.load —— 三级兜底 (cookies.json → 本机 Chrome 自动抓 → AuthRequiredError)
-    全在 Session 层已经实现，不重复造轮子。拿到 http.cookies 之后展平成 {name: value}。
-    """
+def _load_cookies_from_session() -> list[CookieRecord]:
+    """返回 session.cookie_records（已带 domain），fallback 展平 jar（生成 domain='' records）。"""
     session = Session.load()
-    return {name: value for name, value in session.http.cookies.items() if value}
+    if session.cookie_records:
+        return session.cookie_records
+    # 边缘：手工构造 Session（无 cookie_records）时回退
+    return [
+        {"name": name, "value": value, "domain": ""}
+        for name, value in session.http.cookies.items()
+        if value
+    ]
 
 
 @asynccontextmanager
@@ -85,13 +92,13 @@ async def goofish_page(
     *,
     headless: bool | None = None,
     viewport: tuple[int, int] = (1440, 900),
-    cookies: dict[str, str] | None = None,
+    cookies: dict | list | None = None,
 ) -> AsyncIterator[Any]:
     """启动系统 Chrome（独立 tmp profile）+ 灌 cookie，yield 出一个 `Page`。
 
-    `cookies` 可选：显式传入 `{name: value}` 时直接用；不传则走 `Session.load()`
-    三级兜底。自动刷 `_m_h5_tk` 的调用方需要用内存里当前 session 的 cookies 而非
-    磁盘快照（可能已被改）—— 传 `cookies=session.http.cookies` 展平后的 dict。
+    `cookies` 可选：显式传入（flat dict 或带 domain 的 records list）时直接用；
+    不传则走 `Session.load()` 三级兜底。自动刷 `_m_h5_tk` 的调用方需要用内存里
+    当前 session 的 cookie records 而非磁盘快照（可能已被改）。
 
     用法：
         async with goofish_page() as page:
