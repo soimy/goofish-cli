@@ -5,8 +5,8 @@ import asyncio
 
 import pytest
 
-from goofish_cli.commands.search.search import _item_id_from_url
 from goofish_cli.commands.search.search import __test__ as t
+from goofish_cli.commands.search.search import _item_id_from_url
 
 
 def test_normalize_limit_clamps_and_defaults():
@@ -295,3 +295,35 @@ def test_first_card_id_returns_first_with_id():
     assert f([{"url": "https://x/no-id"}, {"url": "https://www.goofish.com/item?id=42"}]) == "42"
     assert f([]) == ""
     assert f([{"url": ""}]) == ""
+
+
+def test_walk_pages_skips_cards_without_numeric_id():
+    """审核 P2：?id=abc 这类解析不出数字 id 的卡片不能跨页重复追加。"""
+    bad = {"url": "https://www.goofish.com/item?id=abc", "title": "bad-card"}
+    script = [
+        _pagination(True, 50),
+        True,
+        # 第 2 页：新卡 101 + 坏卡（坏卡跳过，不影响继续翻页）
+        {**_page_payload(["101"]), "items": [_item("101"), dict(bad)]},
+        _pagination(True, 50),
+        True,
+        # 第 3 页：坏卡再次出现 + 新卡 102（坏卡不重复追加）
+        {**_page_payload(["102"]), "items": [dict(bad), _item("102")]},
+    ]
+    items, seen = [_item("100")], {"100"}
+    fetched, _, reason = asyncio.run(
+        _walk(FakePage(script), items, seen, 1, pages=3, limit=200)
+    )
+    ids = [_item_id_from_url(it["url"]) for it in items]
+    assert ids == ["100", "101", "102"]  # 坏卡被跳过，不重复出现
+    assert fetched == 3
+    assert reason == "pages_reached"
+
+
+def test_walk_pages_non_dict_pagination_state_is_error():
+    """审核 P2：pagination 状态返回 None/非 dict 时优雅终止，不 AttributeError。"""
+    for bad in (None, [], "unexpected", 123):
+        fetched, _, reason = asyncio.run(
+            _walk(FakePage([bad]), [_item("100")], {"100"}, 1, pages=3, limit=200)
+        )
+        assert (fetched, reason) == (1, "error"), f"bad={bad!r}"

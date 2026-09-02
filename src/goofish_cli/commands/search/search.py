@@ -222,6 +222,9 @@ async def _walk_pages(
             pag = await page.evaluate(_PAGINATION_JS)
         except Exception:  # noqa: BLE001 — 执行上下文销毁等，保留已抓结果
             return fetched_pages, total_pages, "error"
+        # 结构突变（None / 非dict）同样按优雅终止处理，不能 AttributeError 穿透
+        if not isinstance(pag, dict):
+            return fetched_pages, total_pages, "error"
 
         if total_pages is None and pag.get("totalPages") is not None:
             total_pages = pag["totalPages"]
@@ -246,6 +249,9 @@ async def _walk_pages(
         # 用 fresh 的首卡会让下一轮等待基准与 DOM �脱节（review P1-2）。
         nxt_items = nxt.get("items") or []
         anchor_id = _first_card_id(nxt_items) or anchor_id
+        # item_id 是输出的稳定主键（调用方按它去重/取详情）。解析不出数字 id
+        # 的卡片（?id=abc 等）跨页会重复追加（seen 只记非空 id），直接跳过。
+        nxt_items = [it for it in nxt_items if _item_id_from_url(it.get("url", ""))]
         fresh = [
             it for it in nxt_items if _item_id_from_url(it.get("url", "")) not in seen
         ]
@@ -294,12 +300,15 @@ async def _run(query: str, limit: int, pages: int) -> dict[str, Any]:
         assert payload is not None
         _raise_for_failed_page(payload)
 
+        # item_id 是输出的稳定主键：解析不出数字 id 的卡片直接跳过，
+        # 否则同一张坏卡跨页会重复追加（seen 只记非空 id）
         for it in payload.get("items") or []:
             item_id = _item_id_from_url(it.get("url", ""))
-            if item_id and item_id in seen:
+            if not item_id:
                 continue
-            if item_id:
-                seen.add(item_id)
+            if item_id in seen:
+                continue
+            seen.add(item_id)
             items.append(it)
         fetched_pages = 1
 
