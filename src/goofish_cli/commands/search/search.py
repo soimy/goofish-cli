@@ -36,6 +36,15 @@ AUTH_WALL_ATTEMPTS = 2
 PAGE_STABLE_MS = 2000
 
 
+def _should_retry(payload: dict[str, Any]) -> bool:
+    """零卡片且明确 requiresAuth 时才重试（瞬时登录墙兜底）。
+
+    #28 合并后的契约：其他零卡片形态（未知页面结构等）不重试，
+    直接交给 `_raise_for_failed_page` 按语义抛错。
+    """
+    return not payload.get("items") and bool(payload.get("requiresAuth"))
+
+
 def _normalize_limit(value: Any) -> int:
     try:
         n = int(value)
@@ -292,7 +301,7 @@ async def _run(query: str, limit: int, pages: int) -> dict[str, Any]:
                 raise GoofishError("搜索页返回结构非预期")
             payload = raw
             # 拿到卡片 / 明确的空结果 / 明确的风控页都不需要重试
-            if raw.get("items") or raw.get("empty") or raw.get("blocked"):
+            if not _should_retry(raw):
                 break
             if attempt < AUTH_WALL_ATTEMPTS:
                 await asyncio.sleep(1.5)
@@ -361,6 +370,7 @@ __test__ = {
     "_normalize_pages": _normalize_pages,
     "_build_search_url": _build_search_url,
     "_item_id_from_url": _item_id_from_url,
+    "_should_retry": _should_retry,
     "_first_card_id": _first_card_id,
     "_walk_pages": _walk_pages,
 }
